@@ -1121,18 +1121,16 @@ function ImageViewer(props: {
 // ---------------------------------------------------------------------------
 
 /**
- * The placeholder card shown for one running job.
+ * The placeholder card shown for one running job that has no record yet.
  *
  * Driven by the Host's in-flight list, so it also appears when the user comes
- * back to the studio while a job is still rendering elsewhere.
+ * back to the studio while a job is still rendering elsewhere. A RETRY never
+ * gets one of these: it reuses the failed record's card (see
+ * {@link GenerationCard}), because a placeholder beside that card reads as a
+ * second task and only merges back when the attempt settles.
  */
-function PendingCard(props: {
-  t: Translate
-  kind: MediaKind
-  retryOf?: string
-  onCancel: () => void
-}): JSX.Element {
-  const { t, kind, retryOf, onCancel } = props
+function PendingCard(props: { t: Translate; kind: MediaKind; onCancel: () => void }): JSX.Element {
+  const { t, kind, onCancel } = props
   return (
     <article className="agnes__card agnes__card--pending">
       <div className="agnes__thumbFrame">
@@ -1146,7 +1144,7 @@ function PendingCard(props: {
         <span className="agnes__pendingLine" style={{ width: '72%' }} />
         <span className="agnes__pendingLine" style={{ width: '46%' }} />
         <div className="agnes__cardActions">
-          <span className="agnes__hint">{retryOf === undefined ? t('hint.background') : t('hint.retrying')}</span>
+          <span className="agnes__hint">{t('hint.background')}</span>
           <span className="agnes__spacer" />
           <button type="button" className="agnes__open" onClick={onCancel}>
             {t('action.cancelJob')}
@@ -1161,25 +1159,48 @@ function PendingCard(props: {
 function GenerationCard(props: {
   t: Translate
   generation: Generation
+  /** Whether the Host is retrying THIS record right now. */
+  retrying: boolean
   onDelete: (id: string) => void
   onRetry: (generation: Generation) => void
+  onCancelJob: () => void
   onOpen: (generation: Generation, opener: Element | null) => void
   disabled: boolean
 }): JSX.Element {
-  const { t, generation, onDelete, onRetry, onOpen, disabled } = props
+  const { t, generation, retrying, onDelete, onRetry, onCancelJob, onOpen, disabled } = props
   const asset = generation.asset
   const isImage = generation.kind === 'image'
   const failed = generation.status === 'failed'
   const took = formatSeconds(generation.durationMs)
   const dimensions =
     asset?.width !== undefined && asset?.height !== undefined ? `${String(asset.width)}×${String(asset.height)}` : undefined
-  const facts = [dimensions, took === '' ? undefined : t('gallery.took', { seconds: took }), ...paramFacts(generation)].filter(
-    (entry): entry is string => entry !== undefined && entry !== '',
-  )
+  // A record being retried still describes its failed attempt until the new one
+  // settles, so its old duration is dropped: it would otherwise read as the
+  // runtime of the attempt the user is watching.
+  const facts = [
+    dimensions,
+    ...(retrying || took === '' ? [] : [t('gallery.took', { seconds: took })]),
+    ...paramFacts(generation),
+  ].filter((entry): entry is string => entry !== undefined && entry !== '')
 
   return (
-    <article className={failed ? 'agnes__card agnes__card--failed' : 'agnes__card'}>
-      {asset !== undefined && isImage ? (
+    <article
+      className={
+        retrying ? 'agnes__card agnes__card--retrying' : failed ? 'agnes__card agnes__card--failed' : 'agnes__card'
+      }
+    >
+      {retrying ? (
+        /* The card the user clicked BECOMES the progress card: same slot, same
+           history row, so restarting a failed task cannot look like a second
+           task appearing next to it. */
+        <div className="agnes__thumbFrame">
+          <div className="agnes__pendingShine" />
+          <span className="agnes__pendingBadge">
+            <span className="agnes__spinner" aria-hidden="true" />
+            {isImage ? t('status.generatingImage') : t('status.generatingVideo')}
+          </span>
+        </div>
+      ) : asset !== undefined && isImage ? (
         <button
           type="button"
           className="agnes__thumbButton"
@@ -1217,53 +1238,72 @@ function GenerationCard(props: {
             </span>
           ))}
         </div>
-        {failed ? (
+        {retrying ? (
+          /* One progress surface per task: the stale failure text and its retry
+             button give way to the retry's own state and one cancel action,
+             because this card IS the attempt that is running. */
+          <div className="agnes__cardActions">
+            <span className="agnes__hint">{t('hint.retrying')}</span>
+            <span className="agnes__spacer" />
+            <button type="button" className="agnes__open" onClick={onCancelJob}>
+              {t('action.cancelJob')}
+            </button>
+          </div>
+        ) : (
           <>
-            <p className="agnes__failText">{generation.error ?? t('status.failed')}</p>
-            {generation.retryable === true ? <span className="agnes__retryHint">{t('error.retryable')}</span> : null}
+            {failed ? (
+              <>
+                <p className="agnes__failText">{generation.error ?? t('status.failed')}</p>
+                {generation.retryable === true ? <span className="agnes__retryHint">{t('error.retryable')}</span> : null}
+              </>
+            ) : null}
+            <div className="agnes__cardActions">
+              {/* The viewer replaces the old new-window link for images only: a
+                  video already has a player in the card, and the lightbox is an
+                  image viewer. */}
+              {asset !== undefined && isImage ? (
+                <button
+                  type="button"
+                  className="agnes__open"
+                  onClick={(event) => onOpen(generation, event.currentTarget)}
+                >
+                  <IconExpand />
+                  {t('gallery.open')}
+                </button>
+              ) : null}
+              {asset !== undefined ? (
+                <a
+                  className="agnes__iconBtn"
+                  href={asset.src}
+                  download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
+                  aria-label={t('gallery.download')}
+                  title={t('gallery.download')}
+                >
+                  <IconDownload />
+                </a>
+              ) : null}
+              {failed && generation.retryable === true ? (
+                <button type="button" className="agnes__open" disabled={disabled} onClick={() => onRetry(generation)}>
+                  <IconReset />
+                  {t('gallery.retry')}
+                </button>
+              ) : null}
+              <span className="agnes__spacer" />
+              <button
+                type="button"
+                className="agnes__iconBtn agnes__iconBtn--danger"
+                disabled={disabled}
+                aria-label={t('gallery.delete')}
+                title={t('gallery.delete')}
+                onClick={() => {
+                  if (confirmInBrowser(t('gallery.confirmDelete'))) onDelete(generation.id)
+                }}
+              >
+                <IconTrash />
+              </button>
+            </div>
           </>
-        ) : null}
-        <div className="agnes__cardActions">
-          {/* The viewer replaces the old new-window link for images only: a
-              video already has a player in the card, and the lightbox is an
-              image viewer. */}
-          {asset !== undefined && isImage ? (
-            <button type="button" className="agnes__open" onClick={(event) => onOpen(generation, event.currentTarget)}>
-              <IconExpand />
-              {t('gallery.open')}
-            </button>
-          ) : null}
-          {asset !== undefined ? (
-            <a
-              className="agnes__iconBtn"
-              href={asset.src}
-              download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
-              aria-label={t('gallery.download')}
-              title={t('gallery.download')}
-            >
-              <IconDownload />
-            </a>
-          ) : null}
-          {failed && generation.retryable === true ? (
-            <button type="button" className="agnes__open" disabled={disabled} onClick={() => onRetry(generation)}>
-              <IconReset />
-              {t('gallery.retry')}
-            </button>
-          ) : null}
-          <span className="agnes__spacer" />
-          <button
-            type="button"
-            className="agnes__iconBtn agnes__iconBtn--danger"
-            disabled={disabled}
-            aria-label={t('gallery.delete')}
-            title={t('gallery.delete')}
-            onClick={() => {
-              if (confirmInBrowser(t('gallery.confirmDelete'))) onDelete(generation.id)
-            }}
-          >
-            <IconTrash />
-          </button>
-        </div>
+        )}
       </div>
     </article>
   )
@@ -1518,6 +1558,24 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   // the studio does NOT clear this, because the job is still real.
   const disabled = submitting || running.length > 0
 
+  /**
+   * Retries do not add a card.
+   *
+   * A retry reuses the failed record's id, and the Host reports it as a running
+   * job whose `retryOf` names the record it will replace. Rendering the usual
+   * placeholder for it showed one task twice — a new skeleton card that only
+   * "merged" into the failed one when the attempt settled — so the record's own
+   * card carries the progress state instead. Only a job with no record to
+   * replace, i.e. a fresh generation, still gets a placeholder of its own.
+   */
+  const retryingRecordIds = new Set<string>()
+  for (const job of running) {
+    if (job.retryOf !== undefined) retryingRecordIds.add(job.retryOf)
+  }
+  /** Jobs that are not a retry, i.e. work with no card of its own yet. */
+  const pendingJobs = running.filter((job) => job.retryOf === undefined)
+  const placeholders = pendingJobs.filter((job) => filter === 'all' || job.kind === filter)
+
   /** The image records the viewer can step through, in gallery order. */
   const viewable = useMemo(
     () => generations.filter((generation) => generation.kind === 'image' && generation.asset !== undefined),
@@ -1687,7 +1745,10 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
             </div>
           ) : null}
 
-          {running.map((job) => (
+          {/* One banner per job that has no card of its own. A retry is already
+              reported by the record's card, and repeating it here would put two
+              progress lines and two cancel buttons for one task on screen. */}
+          {pendingJobs.map((job) => (
             <div className="agnes__busy" role="status" aria-live="polite" key={job.id}>
               <span className="agnes__busyRow">
                 <span className="agnes__spinner" aria-hidden="true" />
@@ -1952,7 +2013,7 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
               </span>
               <span className="agnes__emptyTitle">{loadError ?? t('gallery.loading')}</span>
             </div>
-          ) : filtered.length === 0 && running.length === 0 ? (
+          ) : filtered.length === 0 && placeholders.length === 0 ? (
             <div className="agnes__empty">
               <span className="agnes__emptyIcon">
                 <IconFrame />
@@ -1962,25 +2023,25 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
             </div>
           ) : (
             <div className="agnes__grid">
-              {running
-                .filter((job) => filter === 'all' || job.kind === filter)
-                .map((job) => (
-                  <PendingCard
-                    key={job.id}
-                    t={t}
-                    kind={job.kind}
-                    {...(job.retryOf === undefined ? {} : { retryOf: job.retryOf })}
-                    onCancel={() => void cancelJob(job.id)}
-                  />
-                ))}
+              {placeholders.map((job) => (
+                <PendingCard key={job.id} t={t} kind={job.kind} onCancel={() => void cancelJob(job.id)} />
+              ))}
               {filtered.map((generation) => (
                 <GenerationCard
                   key={generation.id}
                   t={t}
                   generation={generation}
+                  retrying={retryingRecordIds.has(generation.id)}
                   disabled={disabled}
                   onDelete={(id) => void deleteOne(id)}
                   onRetry={(generation) => void retryRecord(generation)}
+                  onCancelJob={() => {
+                    // Cancel the JOB, looked up by the record it replaces: the
+                    // panel is not the authority on job ids, `retryOf` is the
+                    // link between a record and the attempt running for it.
+                    const job = running.find((entry) => entry.retryOf === generation.id)
+                    if (job !== undefined) void cancelJob(job.id)
+                  }}
                   onOpen={openViewer}
                 />
               ))}

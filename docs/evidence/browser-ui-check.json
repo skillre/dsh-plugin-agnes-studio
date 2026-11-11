@@ -1,18 +1,18 @@
 {
-  "at": "2026-11-11T15:47:35.169Z",
+  "at": "2026-11-11T16:30:47.399Z",
   "dsh": "unknown",
   "checks": [
     "browser-app-boot",
     "browser-sidebar-entry: Agnes 工作室",
     "browser-panel-renders: Agnes 工作室",
     "browser-no-render-error",
-    "browser-config-state: 未配置密钥 + notice",
+    "browser-config-state: 已就绪 · 10 个模型",
     "browser-image-form-controls: seg 1K/2K/3K/4K, 8 ratio chips",
     "browser-two-pane-layout: 372px + 728px side by side",
     "browser-video-form-controls: 720P,1080P,1K,2K",
     "browser-flash-narrows-sizes: 720P",
     "browser-submit-reachable: bottom 678 of 757",
-    "browser-submit-guarded-unconfigured: disabled + notice, flat muted surface",
+    "browser-refuses-empty-prompt: 请先填写提示词",
     "browser-gallery-card-grid: 2 cards, 生成记录",
     "browser-gallery-filters: 图片 2 / 视频 0 -> 这个分类下还没有记录切换到「全部」可以看到其它类型的结果。",
     "browser-theme-toggle: dark rgb(35, 35, 36) -> light rgb(255, 255, 255)",
@@ -32,6 +32,8 @@
     "browser-prompt-optimizer: present, disabled without a key",
     "browser-running-jobs-idle: no phantom in-flight UI",
     "display-detail-image: docs/DETAIL*.md + docs/preview*.svg present in the packed tarball",
+    "browser-retry-in-place: 1 card retrying, 0 pending, 3 cards, no banner",
+    "browser-retry-settles-in-place: 3 images, 3 cards",
     "browser-console-clean"
   ]
 }

@@ -14,8 +14,9 @@
  * Requires the harness (`ui-check.mjs`) to be running with CDP_PORT set.
  */
 
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { appendFailedGeneration } from './seed-fixture.mjs'
 
 const port = process.env.CDP_PORT || '9333'
 const evidenceDir = process.env.EVIDENCE_DIR || 'docs/evidence'
@@ -195,21 +196,26 @@ try {
   //    CDP mouse event: the shell's panel row is inside a scroll container whose
   //    hit-testing swallowed the dispatched coordinates, so the synthetic event
   //    silently did nothing while a DOM click switches the panel correctly.
-  const clicked = await cdp.evaluate(
-    `(() => {
-      const span = [...document.querySelectorAll('span')].find((node) => node.textContent.trim() === ${JSON.stringify(box.label)});
-      const button = span?.closest('button');
-      if (!button) return 'no button';
-      button.click();
-      return 'clicked';
-    })()`,
-  )
-  if (clicked !== 'clicked') throw new Error(`could not select the sidebar entry: ${String(clicked)}`)
-  const heading = await until(
-    cdp.evaluate,
+  /** Select the studio panel, or confirm it is already open (used again after a reload). */
+  const openStudio = async () => {
+    if (await cdp.evaluate(`document.querySelector('.agnes__title') !== null`)) return
+    const clicked = await cdp.evaluate(
+      `(() => {
+        const span = [...document.querySelectorAll('span')].find((node) => node.textContent.trim() === ${JSON.stringify(box.label)});
+        const button = span?.closest('button');
+        if (!button) return 'no button';
+        button.click();
+        return 'clicked';
+      })()`,
+    )
+    if (clicked !== 'clicked') throw new Error(`could not select the sidebar entry: ${String(clicked)}`)
+    await until(cdp.evaluate, `document.querySelector('.agnes__title') !== null`, 'the studio page heading')
+  }
+  await openStudio()
+  const heading = await cdp.evaluate(
     `(() => { const h = [...document.querySelectorAll('.agnes__title')][0]; return h ? h.textContent.trim() : null })()`,
-    'the studio page heading',
   )
+  if (heading === null) throw new Error('the studio page heading did not render')
   check('browser-panel-renders', heading)
 
   const renderErrors = await drainConsole()
@@ -1020,13 +1026,135 @@ try {
   // 18. The display metadata shipped in the package is what the plugin card reads.
   check('display-detail-image', 'docs/DETAIL*.md + docs/preview*.svg present in the packed tarball')
 
-  await drainConsole()
-  if (consoleErrors.length > 0) throw new Error(`console errors during the run: ${JSON.stringify(consoleErrors).slice(0, 800)}`)
-  check('browser-console-clean')
-
   // The closing shot: the panel after the full viewer round-trip, which is what
   // proves closing the viewer left the page usable rather than merely present.
   await cdp.shot('05-panel-after-viewer.png')
+
+  // 19. A retry restarts the record's own card.
+  //
+  //     Reported from real use: clicking 重试 put a NEW skeleton card beside the
+  //     failed one, and the two "merged" only when the attempt settled, so one
+  //     task looked like two. A retry reuses the failed record's id, so the panel
+  //     must show the progress INSIDE that record's card, add no card at all, and
+  //     not repeat the same work in a second surface (the background banner).
+  //
+  //     A retry needs a usable key — the Host refuses to register a job without
+  //     one — so the check reports which case it exercised instead of failing a
+  //     deliberately keyless packaging run. The failure is seeded into this OWNED
+  //     profile only now, after every card-count assertion above, so those counts
+  //     stay exact. The page is then reloaded, which also re-proves that the
+  //     in-flight state comes from the Host and not from panel memory.
+  const apiKey = process.env.AGNES_API_KEY
+  if (apiKey === undefined || apiKey === '') {
+    process.stdout.write('  skip browser-retry-in-place (no AGNES_API_KEY: the Host cannot start a retry)\n')
+  } else {
+    const previewState = JSON.parse(await readFile(join(process.cwd(), '.preview-state.json'), 'utf8'))
+    const seeded = await appendFailedGeneration(previewState.dataDir)
+    await cdp.evaluate(`window.__agnesBeforeReload = true`)
+    await cdp.send('Page.reload')
+    await until(
+      cdp.evaluate,
+      `window.__agnesBeforeReload === undefined && document.querySelector('#root')?.children.length > 0`,
+      'the app to boot after a reload',
+      45_000,
+    )
+    await cdp.evaluate(dismissOverlays).catch(() => {})
+    await openStudio()
+
+    // The seeded failure is the newest record, so it leads the gallery.
+    const failedCard = await until(
+      cdp.evaluate,
+      `(() => {
+        const card = document.querySelector('.agnes__card--failed');
+        if (!card) return null;
+        const retry = [...card.querySelectorAll('button')].find((node) => node.textContent.includes('重试'));
+        if (!retry) return null;
+        return JSON.stringify({ text: card.querySelector('.agnes__promptText')?.textContent.trim() ?? '' });
+      })()`,
+      'the seeded retryable failure',
+    )
+    const seededCard = JSON.parse(failedCard)
+    if (!seededCard.text.includes('重试验收')) {
+      throw new Error(`the seeded failure is not the failed card: ${seededCard.text}`)
+    }
+
+    // Click 重试 exactly as a user would: the card's own button, never a shared
+    // "last request" the panel happened to remember.
+    const clicked = await cdp.evaluate(
+      `(() => {
+        const card = document.querySelector('.agnes__card--failed');
+        const retry = card ? [...card.querySelectorAll('button')].find((node) => node.textContent.includes('重试')) : null;
+        if (!retry) return 'no retry button';
+        retry.click();
+        return 'clicked';
+      })()`,
+    )
+    if (clicked !== 'clicked') throw new Error(`could not click the seeded retry: ${String(clicked)}`)
+
+    const progress = await until(
+      cdp.evaluate,
+      `(() => {
+        const card = document.querySelector('.agnes__card--retrying');
+        if (!card) return null;
+        const hint = [...card.querySelectorAll('.agnes__hint')].map((node) => node.textContent.trim());
+        const cancel = [...card.querySelectorAll('button')].some((node) => node.textContent.includes('取消'));
+        return JSON.stringify({
+          retrying: document.querySelectorAll('.agnes__card--retrying').length,
+          pending: document.querySelectorAll('.agnes__card--pending').length,
+          banners: document.querySelectorAll('.agnes__busy').length,
+          cards: document.querySelectorAll('.agnes__card').length,
+          spinner: card.querySelector('.agnes__spinner') !== null,
+          hint,
+          cancel,
+        });
+      })()`,
+      'the retried card to become the progress card',
+    )
+    const retryState = JSON.parse(progress)
+    if (retryState.retrying !== 1) throw new Error('exactly one card must be retrying')
+    if (retryState.pending !== 0) throw new Error('a retry must not add a placeholder card')
+    if (retryState.banners !== 0) throw new Error('a retry must not duplicate its progress in a background banner')
+    if (retryState.cards !== 3) {
+      throw new Error(`a retry must not change the card count: got ${String(retryState.cards)} cards for ${seeded.id}`)
+    }
+    if (!retryState.spinner) throw new Error('the retrying card has no spinner')
+    if (!retryState.cancel) throw new Error('the retrying card offers no way to stop the retry')
+    if (!retryState.hint.some((entry) => entry.includes('正在重试'))) {
+      throw new Error('the retrying card does not explain what it is doing')
+    }
+    await cdp.shot('06-retry-in-place.png')
+    check('browser-retry-in-place', '1 card retrying, 0 pending, 3 cards, no banner')
+
+    // It settles back into the SAME record: the count must not change and no
+    // placeholder may take over. This runs a real generation (~10s).
+    const settled = await until(
+      cdp.evaluate,
+      `(() => {
+        if (document.querySelector('.agnes__card--retrying')) return null;
+        if (document.querySelector('.agnes__card--pending')) return null;
+        return JSON.stringify({
+          cards: document.querySelectorAll('.agnes__card').length,
+          failed: document.querySelectorAll('.agnes__card--failed').length,
+          images: document.querySelectorAll('.agnes__card img').length,
+        });
+      })()`,
+      'the retry to settle into the same card',
+      120_000,
+    )
+    const settledState = JSON.parse(settled)
+    if (settledState.cards !== 3) {
+      throw new Error(`a retried attempt must settle into its own record: got ${String(settledState.cards)} cards`)
+    }
+    await cdp.shot('07-retry-settled.png')
+    check(
+      'browser-retry-settles-in-place',
+      settledState.failed > 0 ? 'settled back to the failed card, 3 cards' : `${String(settledState.images)} images, 3 cards`,
+    )
+  }
+
+  await drainConsole()
+  if (consoleErrors.length > 0) throw new Error(`console errors during the run: ${JSON.stringify(consoleErrors).slice(0, 800)}`)
+  check('browser-console-clean')
 } finally {
   cdp.close()
 }

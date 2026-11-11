@@ -104,12 +104,15 @@ the command above if you no longer want the files.
   whole page does not interrupt it. Coming back, a running job is read from the Host's
   `state.running` and shown again (progress bar and a cancel action); when it settles it becomes a
   result card. Previously the in-flight marker lived in the React tree, so the work continued but
-  the panel showed nothing on return.
+  the panel showed nothing on return. A **new** generation takes a placeholder card in the gallery and
+  a background banner above the form; a retry does not — see the next point.
 - **Retry is a Host operation keyed by record id.** Clicking retry hands the record id to the Host,
   which re-runs **that record's own stored request** — it does not depend on anything the panel
   remembers, so retry keeps working after leaving, returning, or a full page reload (verified: a
   reload followed by retry still starts a job). A retry updates the row in place instead of adding
-  one more failure per attempt.
+  one more failure per attempt. The progress is shown **inside that card itself** (spinner, "retrying;
+  this record updates when it finishes", cancel) — no second "new task" card appears beside it waiting
+  to merge, and the work is not repeated in the background banner.
 - **Prompt optimization.** The "Improve prompt" button in the prompt box calls Agnes' text model
   (`agnes-3.0-flash`) to make the draft more specific, with different advice for stills (composition,
   light, lens) and video (motion, camera movement, pacing), preserving your language and subject.
@@ -144,29 +147,36 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 159 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
-  eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering,
+- 161 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+  eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering
+  (including a retry turning its own card into the progress card with no placeholder added),
   image-viewer interaction, the background-job lifecycle (state reporting a running job, a background
   failure landing as a record, cancel leaving no record, dispose aborting every job, prompt
   optimization), and the SHIPPED client bundle (loaded and rendered through the real loader envelope).
 - Packed tarball installed into a disposable isolated profile: `--dump-config` composition, bounded
   real startup, authenticated `/api` calls, a real image generation downloaded through the media
   route, records and files surviving a restart, and the file disappearing after deletion.
-- Real headless Chrome driving the DSH Web app — 31 checks: sidebar entry, panel render, the
+- Real headless Chrome driving the DSH Web app — 33 checks (the two retry checks need a real API key;
+  without one they are skipped and reported as such): sidebar entry, panel render, the
   two-pane layout (measured: both panes side by side, the composer not spanning the panel), the
   model-derived controls **and their shape** (four resolutions are a segmented control, eight ratios
   are chips), Flash narrowing the resolution list, the generate button reachable without scrolling,
   the gallery card with its uniform 4:3 thumbnail crop, the category filter actually changing the
-  results, both themes following the host (measured surface and text colours), and the image viewer
+  results, both themes following the host (measured surface and text colours), the image viewer
   (spans the viewport, zoom changes the measured layout, closes on Escape and on a backdrop click,
   does not close when the picture is clicked, steps through the gallery with the arrow keys and resets
   the zoom per picture, and returns focus to the control that opened it), the prompt optimizer being
-  in place, and no phantom in-flight UI while idle. Evidence is in `docs/evidence/`.
+  in place, no phantom in-flight UI while idle, and a **retry rendering in place** (the failed record's
+  own card becomes the progress card, zero placeholder cards, no duplicated background banner, the
+  card count unchanged, and the same record settling in its original slot). Evidence is in
+  `docs/evidence/`.
 - Real-key end-to-end runs (not in CI): submit an image, leave the panel, come back while it is still
   rendering and see it running, then watch it settle into a result card; the same running job is still
   shown as running after a **full page reload**, then settles into a result card; submit a video that
   fails, reload the whole page, click retry on the failed record, and see a real job start with the
-  card count unchanged.
+  card count unchanged; click retry on a failed record and see the progress only inside that card
+  (no extra "new task" card), then the same record turn into the generated result in its original
+  slot — verified after a full page reload as well.
 
 ## Development
 

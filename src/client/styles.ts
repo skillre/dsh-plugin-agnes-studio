@@ -865,6 +865,9 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   transform: translateY(-1px);
 }
 .agnes__card--failed { border-color: color-mix(in srgb, var(--a-danger) 38%, transparent); }
+/* A record retried from its own card: the accent border marks the row the user
+   restarted, so the card reads as "working" rather than "failed". */
+.agnes__card--retrying { border-color: color-mix(in srgb, var(--a-accent) 45%, transparent); }
 
 /* A uniform 4:3 frame with "cover": a ragged grid of natural aspect ratios
    leaves holes under every short card and reads as a layout bug. The crop is a

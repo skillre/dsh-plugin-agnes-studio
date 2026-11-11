@@ -17,7 +17,7 @@
  */
 
 import { deflateSync } from 'node:zlib'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /** The generation id the UI check looks for. A literal UUID, because the store validates the shape. */
@@ -171,4 +171,55 @@ export async function seedTwoImageGenerations(dataDir, options = {}) {
     'utf8',
   )
   return { first, second }
+}
+
+/** The failure id the retry check looks for. */
+export const FAILED_FIXTURE_ID = 'd5c9a1f4-2b7e-4e63-b0a8-6f3d1c2e9a70'
+
+/**
+ * Append one retryable failure to an existing index.
+ *
+ * The browser check for the retry path needs a record whose stored request the
+ * Host can replay — `retry` refuses a record without one, so a synthesised
+ * "failed" card without a body would prove nothing. Writing this AFTER the
+ * harness's own seeding keeps every earlier card-count assertion in the driver
+ * exact, which is why the caller does it at the very end of the run and then
+ * reloads the page.
+ *
+ * The request is a plain image prompt on the free Flash model: when the driver
+ * clicks 重试, the Host really runs it, so the check observes the real in-place
+ * progress state instead of a mocked one.
+ */
+export async function appendFailedGeneration(dataDir, options = {}) {
+  const {
+    id = FAILED_FIXTURE_ID,
+    prompt = '重试验收用图：白色桌面上的红苹果',
+    model = 'agnes-image-2.5-flash',
+  } = options
+  const indexPath = join(dataDir, 'index.json')
+  const existing = JSON.parse(await readFile(indexPath, 'utf8'))
+  const now = new Date()
+  const generation = {
+    id,
+    kind: 'image',
+    status: 'failed',
+    model,
+    prompt,
+    params: { model, size: '1K', ratio: '1:1', references: 0 },
+    createdAt: now.toISOString(),
+    finishedAt: now.toISOString(),
+    durationMs: 4_200,
+    errorCode: 'timeout',
+    error: '上游超时：这条记录稍后重试即可。',
+    retryable: true,
+    // `params` is a display summary; the request is what the Host replays, so it
+    // must carry the full parameter set exactly as a real record does.
+    request: { kind: 'image', prompt, model, size: '1K', ratio: '1:1', references: [] },
+  }
+  await writeFile(
+    indexPath,
+    JSON.stringify({ version: 1, generations: [generation, ...existing.generations] }),
+    'utf8',
+  )
+  return generation
 }

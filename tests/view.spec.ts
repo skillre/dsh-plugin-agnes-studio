@@ -9,7 +9,7 @@
  */
 
 import { createElement } from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { StudioPage, SidebarGlyph } from '../src/client/view.js'
 import { dictFor, NAMESPACE, zh } from '../src/client/text.js'
@@ -171,11 +171,16 @@ describe('studio panel', () => {
     expect(await screen.findAllByRole('button', { name: translate('gallery.retry') })).not.toHaveLength(0)
   })
 
-  it('retries the record the click belongs to, by id', async () => {
+  it('retries the record the click belongs to, in place, without adding a card', async () => {
     // Retry is a Host operation keyed by the record id: the panel must not resend a
     // shared "last submitted" request, and it must not depend on anything only this
     // component instance remembers. That is exactly why retry did nothing after the
     // user left the studio and came back — the remembered request was gone.
+    //
+    // It also must not put a placeholder BESIDE the failed card. The Host reuses the
+    // failed record's id, so two cards for one task is a rendering bug that "heals"
+    // only when the attempt settles — reported from real use as "a new task pops out,
+    // then the two merge into one".
     const failedA: Generation = {
       id: 'aaaa1111-1111-4111-8111-111111111111',
       kind: 'image',
@@ -193,6 +198,8 @@ describe('studio panel', () => {
       ...failedA,
       id: 'bbbb2222-2222-4222-8222-222222222222',
       prompt: 'a green circle',
+      errorCode: 'upstream-failed-again',
+      error: '上游 503',
       request: { kind: 'image', prompt: 'a green circle', model: 'agnes-image-2.1-flash', size: '2K', ratio: '4:3', references: [] },
     }
     const { retried } = renderPanel({ generations: [failedA, failedB] })
@@ -205,8 +212,60 @@ describe('studio panel', () => {
       expect(retried).toHaveLength(1)
     })
     expect(retried[0]).toBe(failedB.id)
-    // A retry puts a placeholder in the grid, so the click has visible feedback.
-    await waitFor(() => expect(document.querySelector('.agnes__card--pending')).not.toBeNull())
+
+    // The clicked card IS the progress card: same slot, same history row.
+    const retryingCard = await waitFor(() => {
+      const card = document.querySelector('.agnes__card--retrying')
+      expect(card).not.toBeNull()
+      return card as HTMLElement
+    })
+    expect(document.querySelector('.agnes__card--pending')).toBeNull()
+    expect(document.querySelectorAll('.agnes__card')).toHaveLength(2)
+    expect(retryingCard.textContent).toContain(translate('hint.retrying'))
+    expect(retryingCard.querySelector('.agnes__spinner')).not.toBeNull()
+    expect(retryingCard.querySelector('.agnes__thumbEmpty')).toBeNull()
+    // The stale failure line and its retry button are gone from the retried card;
+    // the untouched failure still shows both.
+    expect(screen.queryByText('上游 503')).toBeNull()
+    expect(screen.getByText('上游 502')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: translate('gallery.retry') })).toHaveLength(1)
+  })
+
+  it('returns the record to its failed card when a retry is cancelled', async () => {
+    // Cancelling must not strand the row in a "working" state, and it must not
+    // leave a record behind: the Host only stores SETTLED attempts, so the card
+    // goes back to the failure the user can retry again.
+    const failed: Generation = {
+      id: 'cccc3333-3333-4333-8333-333333333333',
+      kind: 'video',
+      status: 'failed',
+      model: 'agnes-video-2.5-flash',
+      prompt: 'a queue test',
+      params: {},
+      createdAt: '2026-11-11T00:00:00.000Z',
+      errorCode: 'queue-full',
+      error: '队列已满',
+      retryable: true,
+      request: { kind: 'video', prompt: 'a queue test', model: 'agnes-video-2.5-flash', mode: 'text', size: '720P', ratio: '16:9', seconds: 5, references: [] },
+    }
+    renderPanel({ generations: [failed] })
+    fireEvent.click(await screen.findByRole('button', { name: translate('gallery.retry') }))
+    const retryingCard = await waitFor(() => {
+      const card = document.querySelector('.agnes__card--retrying')
+      expect(card).not.toBeNull()
+      return within(card as HTMLElement)
+    })
+    // The retry is reported by the card and nowhere else: one progress surface,
+    // one cancel button for the task.
+    expect(screen.queryAllByRole('button', { name: translate('action.cancelJob') })).toHaveLength(1)
+    fireEvent.click(retryingCard.getByRole('button', { name: translate('action.cancelJob') }))
+
+    await waitFor(() => expect(document.querySelector('.agnes__card--retrying')).toBeNull())
+    expect(document.querySelector('.agnes__card--pending')).toBeNull()
+    expect(document.querySelectorAll('.agnes__card')).toHaveLength(1)
+    expect(screen.getByText('队列已满')).toBeTruthy()
+    expect(screen.getByRole('button', { name: translate('gallery.retry') })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: translate('action.cancelJob') })).toBeNull()
   })
 
   it('switches to the video form and narrows the resolution list with the model', async () => {
@@ -310,6 +369,49 @@ describe('studio panel', () => {
     expect((screen.getByRole('button', { name: translate('form.submitImage') }) as HTMLButtonElement).disabled).toBe(true)
     // The job cannot be stopped from anywhere else, so the panel offers it.
     expect(screen.getAllByRole('button', { name: translate('action.cancelJob') }).length).toBeGreaterThan(0)
+  })
+
+  it('shows a Host-reported retry as progress on the record, not as a second card', async () => {
+    // Coming back to the studio (or reloading the page) while a retry is still
+    // running must render the same in-place state as the click did: the Host
+    // reports the job with `retryOf`, so the record's card is the progress card.
+    const failed: Generation = {
+      id: 'dddd4444-4444-4444-8444-444444444444',
+      kind: 'image',
+      status: 'failed',
+      model: 'agnes-image-2.5-flash',
+      prompt: 'retry me after a reload',
+      params: {},
+      createdAt: '2026-11-11T00:00:00.000Z',
+      errorCode: 'timeout',
+      error: '上游超时',
+      retryable: true,
+      request: { kind: 'image', prompt: 'retry me after a reload', model: 'agnes-image-2.5-flash', size: '1K', ratio: '1:1', references: [] },
+    }
+    renderPanel({
+      generations: [failed],
+      running: [
+        {
+          id: failed.id,
+          kind: 'image',
+          prompt: failed.prompt,
+          model: failed.model,
+          startedAt: new Date().toISOString(),
+          retryOf: failed.id,
+        },
+      ],
+    })
+
+    const card = await waitFor(() => {
+      const found = document.querySelector('.agnes__card--retrying')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    expect(document.querySelectorAll('.agnes__card')).toHaveLength(1)
+    expect(document.querySelector('.agnes__card--pending')).toBeNull()
+    expect(document.querySelector('.agnes__busy')).toBeNull()
+    expect(card.textContent).toContain(translate('hint.retrying'))
+    expect(within(card).getByRole('button', { name: translate('action.cancelJob') })).toBeTruthy()
   })
 
   it('keeps polling while the Host reports a running job, then stops', async () => {
