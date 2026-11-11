@@ -173,7 +173,16 @@ try {
     .then((text) => JSON.parse(text).owned)
     .catch(() => undefined)
   if (typeof ownedPath === 'string' && existsSync(ownedPath)) {
-    await rm(ownedPath, { recursive: true, force: true }).catch(() => {})
+    // Delete, then confirm it STAYS gone: a DSH process that was still exiting
+    // can flush a session cache back into the tree after the removal walked past
+    // it. Two consecutive empty checks are required for the same reason as in
+    // ui-preview.mjs.
+    let cleanChecks = 0
+    for (let attempt = 0; attempt < 12 && cleanChecks < 2; attempt += 1) {
+      await rm(ownedPath, { recursive: true, force: true }).catch(() => {})
+      await delay(400)
+      cleanChecks = existsSync(ownedPath) ? 0 : cleanChecks + 1
+    }
     const stillThere = existsSync(ownedPath)
     process.stdout.write(`cleanup: owned profile removed=${!stillThere}\n`)
     if (stillThere) failure ??= new Error(`owned profile could not be removed: ${ownedPath}`)

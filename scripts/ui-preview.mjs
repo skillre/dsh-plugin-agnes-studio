@@ -12,7 +12,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -61,22 +61,40 @@ async function shutdown() {
   }
   // Wait for the child to actually be reaped before deleting its home.
   //
-  // A single `rm -rf` raced the dying process once and left a re-created
-  // `home/storages/...` directory behind: DSH flushed a session cache file after
-  // the removal had walked past it. The leftover survived into the next run and
-  // looked like a leaked profile. Retry the removal until the tree is really
-  // gone, and fail loudly if it never is.
+  // A single `rm -rf` raced the dying process: DSH flushed a session cache file
+  // after the removal had walked past it, so `home/storages/...` reappeared under
+  // a tree that had just been deleted. An earlier fix retried only while the
+  // removal FAILED, which did not help — the first `rm` succeeds, the loop exits,
+  // and the flush lands afterwards. Three such trees were found under the temp
+  // root after failed runs.
+  //
+  // So the check is not "did the removal succeed" but "does the tree STAY gone".
+  // Delete, wait, and delete again until two consecutive checks find nothing; the
+  // wait is what lets a flush in flight land so it can be removed.
   await delay(1000)
   try {
     const marker = await readFile(join(owned, '.owned'), 'utf8')
     if (marker.trim() !== owned) throw new Error('owned marker mismatch')
-    let removed = false
-    for (let attempt = 0; attempt < 5 && !removed; attempt += 1) {
+    let cleanChecks = 0
+    for (let attempt = 0; attempt < 12 && cleanChecks < 2; attempt += 1) {
       await rm(owned, { recursive: true, force: true })
-      removed = !existsSync(owned)
-      if (!removed) await delay(500)
+      await delay(400)
+      cleanChecks = existsSync(owned) ? 0 : cleanChecks + 1
     }
-    if (!removed) throw new Error(`owned root survived removal: ${owned}`)
+    if (existsSync(owned)) {
+      // Name what survived: a bare "cleanup failed" sent the previous
+      // investigation looking at the harness rather than at the late flush.
+      const leftovers = []
+      const walk = async (dir) => {
+        for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+          const child = join(dir, entry.name)
+          if (entry.isDirectory()) await walk(child)
+          else leftovers.push(child)
+        }
+      }
+      await walk(owned)
+      throw new Error(`owned root survived removal: ${owned} (${String(leftovers.length)} file(s): ${leftovers.slice(0, 3).join(', ')})`)
+    }
     process.stdout.write(`cleaned ${owned}\n`)
   } catch (error) {
     process.stderr.write(`cleanup failed: ${error.message}\n`)
