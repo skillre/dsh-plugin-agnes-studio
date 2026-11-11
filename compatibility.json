@@ -21,7 +21,7 @@
         "storage-artifact-across-restart",
         "api-delete-removes-file",
         "display-detail-image",
-        "browser",
+        "browser-app-boot",
         "browser-sidebar-entry",
         "browser-panel-renders",
         "browser-no-render-error",
@@ -31,6 +31,8 @@
         "browser-flash-narrows-sizes",
         "browser-submit-guarded-unconfigured",
         "browser-gallery-card-grid",
+        "browser-theme-toggle",
+        "browser-locale-dictionary",
         "browser-gallery-card",
         "browser-viewer-opens",
         "browser-viewer-covers-viewport",
@@ -38,13 +40,11 @@
         "browser-viewer-escape-closes",
         "browser-viewer-click-zooms",
         "browser-viewer-backdrop-closes",
-        "browser-theme-toggle",
-        "browser-locale-dictionary",
         "browser-console-clean"
       ],
-      "evidence": "docs/evidence/isolated-mount-0.1.0.json",
+      "evidence": "docs/evidence/isolated-mount-0.1.1.json",
       "method": "packed-tarball",
-      "notes": "Installed from the packed tarball into a disposable isolated non-Desktop profile, composed with --dump-config, booted with a bounded real startup, exercised over the authenticated /api transport, generated one real image through the live Agnes API, downloaded its bytes through the media route, verified the record and artifact survive a restart, and verified deletion removes both. The Client half was then driven in a real headless Chrome against the owned DSH Web app over CDP (scripts/ui-check.mjs), with one deterministic image record seeded into the owned data directory (scripts/seed-fixture.mjs) so the gallery and viewer could be exercised without network, credentials or quota: the sidebar entry selects the studio page, the panel renders without a console error, both capability tabs render their model-derived controls, the Flash video model narrows the resolution list to 720P, the submit is guarded when no key is configured, the gallery renders the seeded card, and the image viewer opens in-panel, covers the whole viewport with no containing-block trap, zooms by a measured layout change rather than a label, closes on Escape and on a backdrop click, and does not close when the picture itself is clicked. The theme toggle keeps the panel legible and the locale dictionary resolves. Evidence: docs/evidence/isolated-mount-0.1.0.json, docs/evidence/browser-ui-check.json and docs/evidence/screenshots/. Cleanup verified: owned roots removed, all processes stopped."
+      "notes": "Installed from the packed tarball into a disposable isolated non-Desktop profile, composed with --dump-config, booted with a bounded real startup, exercised over the authenticated /api transport, generated one real image through the live Agnes API, downloaded its bytes through the media route, verified the record and artifact survive a restart, and verified deletion removes both. The Client half was then driven in a real headless Chrome against the owned DSH Web app over CDP (scripts/ui-check.mjs), with one deterministic image record seeded into the owned data directory (scripts/seed-fixture.mjs) so the gallery and viewer could be exercised without network, credentials or quota: the sidebar entry selects the studio page, the panel renders without a console error, both capability tabs render their model-derived controls, the Flash video model narrows the resolution list to 720P, the submit is guarded when no key is configured, the gallery renders the seeded card, and the image viewer opens in-panel, covers the whole viewport with no containing-block trap, zooms by a measured layout change rather than a label, closes on Escape and on a backdrop click, and does not close when the picture itself is clicked. The theme toggle keeps the panel legible and the locale dictionary resolves. Evidence: docs/evidence/isolated-mount-0.1.1.json, docs/evidence/browser-ui-check.json and docs/evidence/screenshots/. Cleanup verified: owned roots removed, all processes stopped."
     }
   ]
 }
