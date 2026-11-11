@@ -28,7 +28,26 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  await rm(dataDir, { recursive: true, force: true })
+  // Retry the removal, don't just call it once.
+  //
+  // A job aborted by `dispose()` can still be unwinding when the test that
+  // started it returns: the store writes its index through a temporary sibling
+  // and a rename, so a removal that races that write leaves the directory
+  // non-empty. The first `rm` then FAILS with ENOTEMPTY, and the residue breaks
+  // whichever test runs next. The invariant is "the directory is gone", not "one
+  // removal call succeeded", so the check is repeated a bounded number of times
+  // and the last failure is reported instead of swallowed.
+  let lastError
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rm(dataDir, { recursive: true, force: true })
+      return
+    } catch (error) {
+      lastError = error
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)))
+    }
+  }
+  throw lastError
 })
 
 /** A generation record for direct store tests. */
@@ -423,7 +442,42 @@ describe('runtime', () => {
     await vi.waitFor(() => {
       expect(aborted).toBe(true)
     })
-    expect((await runtime.state()).running).toEqual([])
+    // Wait for the aborted job to finish unwinding before the test's own teardown
+    // removes the data directory: a still-running rejection would otherwise write
+    // into a directory that no longer exists and fail the NEXT test with ENOTEMPTY.
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).running).toEqual([])
+    })
+    // An aborted job is a cancellation, not a failure, so nothing is recorded.
+    expect((await runtime.state()).generations).toEqual([])
+  })
+
+  it('treats an aborted job as cancelled, whatever error shape it surfaced', async () => {
+    // A real client can reject an aborted request with a plain Error rather than
+    // an AbortError (a socket teardown, a wrapped transport failure). Judging the
+    // outcome by the error type alone recorded that as a failure — and, worse, it
+    // wrote to the store while a plugin teardown was removing the data directory,
+    // which is the ENOTEMPTY this reproduces. An abort by the job's OWN controller
+    // is a cancellation by definition, so nothing may be written.
+    const hang = fakeClient({
+      generateImage: async (_request, options) => {
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            reject(new Error('socket hang up'))
+          })
+        })
+        return { bytes: PNG, mediaType: 'image/png' }
+      },
+    })
+    const runtime = await runtimeWith(hang)
+    const job = await runtime.start(defaultRequest('image', 'x'))
+    runtime.cancel(job.id)
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).running).toEqual([])
+    })
+    // No failure record, and the store is untouched.
+    expect((await runtime.state()).generations).toEqual([])
+    expect(await readdir(join(dataDir, 'media'))).toEqual([])
   })
 
   it('optimizes a prompt with the text model', async () => {

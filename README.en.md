@@ -144,7 +144,7 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 158 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 159 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering,
   image-viewer interaction, the background-job lifecycle (state reporting a running job, a background
   failure landing as a record, cancel leaving no record, dispose aborting every job, prompt

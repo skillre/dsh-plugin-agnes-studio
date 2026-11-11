@@ -273,6 +273,13 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
           ? await client.generateImage(request, { signal: controller.signal })
           : await client.generateVideo(request, { signal: controller.signal })
     } catch (error) {
+      // The job's OWN controller aborting means the user (or the plugin shutting
+      // down) cancelled this work, whatever error shape the client surfaced. That
+      // must never be recorded as a failure, and must never race a teardown that
+      // has already removed the store: report a cancellation and touch nothing.
+      if (controller.signal.aborted) {
+        throw new StudioError('cancelled', '请求已取消。')
+      }
       const failure = asStudioError(error)
       const settledAt = now()
       const failed: Generation = {

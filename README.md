@@ -130,7 +130,7 @@ rm -rf ~/.dsh/agnes-studio
 
 ## 验证记录
 
-- 离线测试 158 项：参数校验、响应解析、错误映射、存储并发与淘汰、路由栅栏、媒体路径形状、
+- 离线测试 159 项：参数校验、响应解析、错误映射、存储并发与淘汰、路由栅栏、媒体路径形状、
   Range 请求、schema 契约、工具参数映射、看板渲染、图片查看器交互、后台任务生命周期
   （state 报告在跑任务、后台失败落成记录、取消不留记录、dispose 中止所有任务、优化提示词），
   以及**打包后的 client bundle**（走真实 loader 信封加载并渲染两个注册面）。
@@ -150,7 +150,7 @@ rm -rf ~/.dsh/agnes-studio
 
 ```sh
 npm install
-npm run check     # preview + typecheck + 158 项测试 + publint + pack
+npm run check     # preview + typecheck + 159 项测试 + publint + pack
 npm pack
 ```
 
