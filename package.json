@@ -1,7 +1,7 @@
 {
   "name": "@skillre/dsh-plugin-agnes-studio",
   "version": "0.1.0",
-  "description": "Agnes AI \u514d\u8d39\u751f\u56fe\u4e0e\u751f\u89c6\u9891\u5de5\u4f5c\u53f0\uff1a\u4fa7\u680f\u770b\u677f\u3001\u53ef\u8c03\u53c2\u6570\u7684\u56fe\u7247/\u89c6\u9891\u751f\u6210\uff0c\u4ee5\u53ca\u4f1a\u8bdd\u5185\u53ef\u8c03\u7528\u7684 DSH \u5de5\u5177",
+  "description": "Agnes AI 免费生图与生视频工作台：侧栏看板、可调参数的图片/视频生成，以及会话内可调用的 DSH 工具",
   "icon": "./icon.svg",
   "type": "module",
   "license": "MIT",
@@ -33,7 +33,6 @@
     "compatibility.json",
     "docs/DETAIL.md",
     "docs/DETAIL.zh.md",
-    "docs/PREVIEW.md",
     "docs/preview.svg",
     "docs/preview.zh.svg",
     "locale/*.json",
@@ -41,7 +40,8 @@
     "README.md",
     "README.en.md",
     "UNINSTALL.md",
-    "LICENSE"
+    "LICENSE",
+    "!docs/PREVIEW.md"
   ],
   "publishConfig": {
     "access": "public"
@@ -61,9 +61,9 @@
     "agnes",
     "image-generation",
     "video-generation",
-    "\u751f\u56fe",
-    "\u751f\u89c6\u9891",
-    "AI\u7ed8\u753b"
+    "生图",
+    "生视频",
+    "AI绘画"
   ],
   "dsh": {
     "manifestVersion": 1,

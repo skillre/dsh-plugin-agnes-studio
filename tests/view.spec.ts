@@ -9,8 +9,8 @@
  */
 
 import { createElement } from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { StudioPage, SidebarGlyph } from '../src/client/view.js'
 import { dictFor, NAMESPACE, zh } from '../src/client/text.js'
 import type { ClientApi } from '../src/client/api.js'
@@ -203,6 +203,165 @@ describe('studio panel', () => {
     fireEvent.click(screen.getByRole('button', { name: `${translate('gallery.images')} 1` }))
     expect(await screen.findByText('an image record')).toBeTruthy()
     expect(screen.queryByText('a video record')).toBeNull()
+  })
+})
+
+/**
+ * The image viewer.
+ *
+ * These exist because of a defect the previous suite could not see: "打开原图"
+ * was an `<a target="_blank">` to a session-authenticated same-origin path. It
+ * rendered, focused, and did nothing, because the Desktop shell denies every
+ * popup the page requests and only forwards `https:` URLs to the OS browser.
+ * A DOM-presence assertion passes on that build; only clicking and inspecting the
+ * resulting overlay catches it. So every test here drives the interaction.
+ */
+describe('image viewer', () => {
+  /** One stored image generation, ready to open. */
+  function imageGeneration(overrides: Partial<Generation> = {}): Generation {
+    return {
+      id: 'viewer-1',
+      kind: 'image',
+      status: 'succeeded',
+      model: 'agnes-image-2.5-flash',
+      prompt: 'a viewer fixture',
+      params: { size: '1K' },
+      createdAt: '2026-11-11T00:00:00.000Z',
+      asset: { src: '/api/agnes-studio/media?id=viewer-1', mediaType: 'image/png', bytes: 512, width: 96, height: 96 },
+      ...overrides,
+    }
+  }
+
+  /** The zoom percentage the viewer reports, as a number. */
+  function zoomPercent(): number {
+    const label = document.querySelector('.agnes__lightboxZoom')
+    if (label === null) throw new Error('no zoom label')
+    return Number.parseInt(String(label.textContent).replace('%', ''), 10)
+  }
+
+  it('is a button, not a new-window link', async () => {
+    // The exact regression: an `<a target="_blank">` looks identical in the DOM
+    // and is a no-op in the Desktop shell.
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    const open = document.querySelector('.agnes__open')
+    expect(open).not.toBeNull()
+    expect(open?.tagName).toBe('BUTTON')
+    expect(open?.getAttribute('href')).toBeNull()
+    expect(open?.getAttribute('target')).toBeNull()
+    expect(open?.textContent).toBe(translate('gallery.open'))
+    // No other element may still open a popup for the image.
+    const popups = [...document.querySelectorAll('a[target="_blank"]')]
+    expect(popups).toHaveLength(0)
+  })
+
+  it('opens on click, showing the same URL at fit zoom', async () => {
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    expect(document.querySelector('.agnes__lightbox')).toBeNull()
+
+    fireEvent.click(document.querySelector('.agnes__open') as Element)
+    const box = await screen.findByRole('dialog')
+    expect(box.getAttribute('aria-modal')).toBe('true')
+    expect(box.getAttribute('aria-label')).toBe(translate('gallery.viewer'))
+    const shown = document.querySelector('.agnes__lightboxImage')
+    expect(shown?.getAttribute('src')).toBe('/api/agnes-studio/media?id=viewer-1')
+    expect(zoomPercent()).toBe(100)
+  })
+
+  it('also opens from the thumbnail', async () => {
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    fireEvent.click(document.querySelector('.agnes__thumbButton') as Element)
+    expect(await screen.findByRole('dialog')).toBeTruthy()
+  })
+
+  it('zooms with the toolbar controls and clamps at the declared range', async () => {
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    fireEvent.click(document.querySelector('.agnes__open') as Element)
+    await screen.findByRole('dialog')
+
+    fireEvent.click(document.querySelector('.agnes__lightboxZoomIn') as Element)
+    expect(zoomPercent()).toBeGreaterThan(100)
+    const zoomedIn = zoomPercent()
+
+    fireEvent.click(document.querySelector('.agnes__lightboxReset') as Element)
+    expect(zoomPercent()).toBe(100)
+
+    // Out at fit zoom is a no-op, not a shrink below the fit: a picture smaller
+    // than the stage reads as broken rather than as zoomed out.
+    fireEvent.click(document.querySelector('.agnes__lightboxZoomOut') as Element)
+    expect(zoomPercent()).toBe(100)
+
+    // In past the cap must stop at 800%, which is where one pixel of a 4K
+    // render is readable.
+    for (let press = 0; press < 40; press += 1) {
+      fireEvent.click(document.querySelector('.agnes__lightboxZoomIn') as Element)
+    }
+    expect(zoomPercent()).toBe(800)
+    expect(zoomedIn).toBeGreaterThan(100)
+  })
+
+  it('closes on Escape', async () => {
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    fireEvent.click(document.querySelector('.agnes__open') as Element)
+    await screen.findByRole('dialog')
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(document.querySelector('.agnes__lightbox')).toBeNull())
+    // The panel itself must survive: closing the viewer is not a panel crash.
+    expect(document.querySelector('.agnes__title')).not.toBeNull()
+  })
+
+  it('closes on the backdrop and on the close button, but not on the picture', async () => {
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+
+    // A click on the picture zooms; it must not dismiss.
+    fireEvent.click(document.querySelector('.agnes__open') as Element)
+    await screen.findByRole('dialog')
+    fireEvent.click(document.querySelector('.agnes__lightboxImage') as Element)
+    expect(document.querySelector('.agnes__lightbox')).not.toBeNull()
+    expect(zoomPercent()).toBeGreaterThan(100)
+
+    fireEvent.click(document.querySelector('.agnes__lightboxClose') as Element)
+    await waitFor(() => expect(document.querySelector('.agnes__lightbox')).toBeNull())
+
+    // A click on the overlay itself dismisses.
+    fireEvent.click(document.querySelector('.agnes__open') as Element)
+    await screen.findByRole('dialog')
+    fireEvent.click(document.querySelector('.agnes__lightbox') as Element)
+    await waitFor(() => expect(document.querySelector('.agnes__lightbox')).toBeNull())
+  })
+
+  it('removes its window listener when it unmounts', async () => {
+    // A leaked keydown listener would keep closing on Escape after the panel is
+    // gone, which is invisible until some other surface starts using Escape.
+    const remove = vi.spyOn(window, 'removeEventListener')
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    fireEvent.click(document.querySelector('.agnes__open') as Element)
+    await screen.findByRole('dialog')
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(document.querySelector('.agnes__lightbox')).toBeNull())
+    expect(remove.mock.calls.some((call) => call[0] === 'keydown')).toBe(true)
+    remove.mockRestore()
+  })
+
+  it('stays open across a Host state refresh', async () => {
+    // The panel re-reads state after a failed attempt; the viewer is keyed by
+    // record id rather than by object identity so a refresh must not close it.
+    const { api } = renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    fireEvent.click(document.querySelector('.agnes__open') as Element)
+    await screen.findByRole('dialog')
+
+    // A second state read returns a structurally new record with the same id.
+    await act(async () => {
+      await api.state()
+    })
+    expect(document.querySelector('.agnes__lightbox')).not.toBeNull()
   })
 })
 

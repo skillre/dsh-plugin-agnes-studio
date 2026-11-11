@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "fleetOwner": "skillre",
   "slug": "agnes-studio",
-  "templateVersion": "0.10.0",
-  "templateDigest": "sha256:bd20a8ba654373a462a9b3bb269bade538747b2e7111df055db035e89a377434",
-  "policyVersion": "0.15.0",
-  "policyDigest": "sha256:e08d89b0ce6ba913479063116146156859d7e7e572508a153db534e182594f66",
+  "templateVersion": "0.11.0",
+  "templateDigest": "sha256:2ec58c8e087ed221351529f5ad8acf39c01bfb58d30aa135e6fbd604868af65e",
+  "policyVersion": "0.16.0",
+  "policyDigest": "sha256:87da88c54b7111493ffef1b1dde04b18b932dc2545de80c38d468a6a572c985a",
   "createdAt": "2026-11-11",
   "createdWithDsh": "0.2.2-rc.1"
 }

@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import type { ClientApi } from './api.js'
 import { ActionError } from './api.js'
 import type { ClientLocaleLike, SidebarEntryProps } from './contracts.js'
@@ -36,6 +37,7 @@ import {
   VIDEO_SECONDS,
   modelsFor,
   type Generation,
+  type GenerationAsset,
   type GenerationRequest,
   type ImageRatio,
   type ImageSize,
@@ -61,6 +63,8 @@ import {
 // gallery.empty, gallery.emptyFiltered, gallery.all, gallery.images,
 // gallery.videos, gallery.delete, gallery.clear, gallery.confirmClear,
 // gallery.confirmDelete, gallery.retry, gallery.download, gallery.open,
+// gallery.viewer, gallery.close, gallery.zoomIn, gallery.zoomOut,
+// gallery.resetZoom, gallery.hint,
 // gallery.took, gallery.loading, gallery.loadFailed, error.retryable,
 // error.not-configured, error.queue-full, error.timeout, error.unauthorized,
 // error.rate-limited, error.cancelled, error.unknown, action.dismiss,
@@ -311,15 +315,336 @@ function ReferenceList(props: {
   )
 }
 
+/** Lowest zoom: the picture fits the stage. */
+const VIEWER_MIN_ZOOM = 1
+/** Highest zoom: far enough in to read one pixel of a 4K render. */
+const VIEWER_MAX_ZOOM = 8
+/** The zoom a click on the picture jumps to, and back from. */
+const VIEWER_CLICK_ZOOM = 2
+/** One wheel notch or one button press multiplies the zoom by this. */
+const VIEWER_ZOOM_STEP = 1.25
+/** Pointer travel, in px, before a press counts as a pan instead of a click. */
+const VIEWER_DRAG_THRESHOLD = 3
+
+/** Zoom plus pan, as the picture's transform expresses it. */
+interface ViewerTransform {
+  readonly zoom: number
+  readonly x: number
+  readonly y: number
+}
+
+/** The resting transform: fitted, centred. */
+const VIEWER_IDENTITY: ViewerTransform = { zoom: VIEWER_MIN_ZOOM, x: 0, y: 0 }
+
+/** Keep a zoom inside the declared range, tolerating a NaN from a bad event. */
+function clampViewerZoom(value: number): number {
+  if (!Number.isFinite(value)) return VIEWER_MIN_ZOOM
+  return Math.min(VIEWER_MAX_ZOOM, Math.max(VIEWER_MIN_ZOOM, value))
+}
+
+/** A 16px stroke icon for the viewer controls; inherits the button's color. */
+function ViewerIcon({ children }: { readonly children: ReactNode }): JSX.Element {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.9"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {children}
+    </svg>
+  )
+}
+
+/**
+ * The in-panel image viewer.
+ *
+ * Why this exists instead of a new-window link: the stored media URL is a
+ * same-origin, session-authenticated path. The Desktop shell denies every popup
+ * the page requests, so `target="_blank"` did nothing at all, and opening the URL
+ * in an external browser would answer 401 anyway. The panel therefore owns the
+ * zoom itself and never leaves the window.
+ *
+ * It renders in the component tree under a `position: fixed` overlay rather than
+ * through a portal: the browser bundle's module envelope can only resolve
+ * `react`, so importing `react-dom` would break module loading.
+ */
+function ImageViewer(props: {
+  t: Translate
+  generation: Generation
+  asset: GenerationAsset
+  onClose: () => void
+}): JSX.Element {
+  const { t, generation, asset, onClose } = props
+  const [view, setView] = useState<ViewerTransform>(VIEWER_IDENTITY)
+  const [dragging, setDragging] = useState(false)
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  const imageRef = useRef<HTMLImageElement | null>(null)
+  const closeRef = useRef<HTMLButtonElement | null>(null)
+  /** The committed transform, so the native wheel listener never reads a stale value. */
+  const latest = useRef<ViewerTransform>(VIEWER_IDENTITY)
+  latest.current = view
+  /** The live pan; a ref because a pointer move must not re-render per frame. */
+  const pan = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    originX: number
+    originY: number
+    moved: boolean
+  } | null>(null)
+  /** Set when a pan ended, so its trailing click does not toggle the zoom. */
+  const suppressClick = useRef(false)
+
+  // Land focus inside the dialog, on the safe action.
+  useEffect(() => {
+    closeRef.current?.focus()
+  }, [])
+
+  // Escape closes from anywhere in the panel, not only while the stage has
+  // focus. The listener is removed on unmount, so closing leaves no global trace.
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [onClose])
+
+  /**
+   * Scale about one screen point.
+   *
+   * `translate(x, y) scale(z)` scales about the picture's own centre, so a plain
+   * zoom drifts the detail the user aimed at off screen. Keeping the point under
+   * the cursor fixed needs the element's UNTRANSFORMED centre, and
+   * `getBoundingClientRect()` already includes the translate — so the base centre
+   * is the current rect centre minus the current pan.
+   */
+  const zoomAt = useCallback((nextZoom: number, clientX: number, clientY: number): void => {
+    const target = clampViewerZoom(nextZoom)
+    const current = latest.current
+    const node = imageRef.current
+    if (target <= VIEWER_MIN_ZOOM || node === null) {
+      // Returning to 1x always recentres: a picture left off-centre at fit zoom
+      // reads as a bug, not as a remembered position.
+      setView(VIEWER_IDENTITY)
+      return
+    }
+    const rect = node.getBoundingClientRect()
+    const baseX = rect.left + rect.width / 2 - current.x
+    const baseY = rect.top + rect.height / 2 - current.y
+    const ux = clientX - baseX
+    const uy = clientY - baseY
+    const ratio = target / current.zoom
+    setView({
+      zoom: target,
+      x: ux - ratio * (ux - current.x),
+      y: uy - ratio * (uy - current.y),
+    })
+  }, [])
+
+  /** Zoom about the middle of the stage, for the button controls. */
+  const zoomFromButton = useCallback(
+    (factor: number): void => {
+      const node = stageRef.current
+      if (node === null) {
+        zoomAt(latest.current.zoom * factor, 0, 0)
+        return
+      }
+      const rect = node.getBoundingClientRect()
+      zoomAt(latest.current.zoom * factor, rect.left + rect.width / 2, rect.top + rect.height / 2)
+    },
+    [zoomAt],
+  )
+
+  // Wheel zoom is bound natively and non-passively: React's synthetic wheel
+  // listener is passive at the root, so `preventDefault()` there is ignored and
+  // the panel behind the overlay would scroll while the user zooms.
+  useEffect(() => {
+    const node = stageRef.current
+    if (node === null || typeof node.addEventListener !== 'function') return undefined
+    const onWheel = (event: WheelEvent): void => {
+      event.preventDefault()
+      const factor = event.deltaY < 0 ? VIEWER_ZOOM_STEP : 1 / VIEWER_ZOOM_STEP
+      zoomAt(latest.current.zoom * factor, event.clientX, event.clientY)
+    }
+    node.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      node.removeEventListener('wheel', onWheel)
+    }
+  }, [zoomAt])
+
+  const endPan = (): void => {
+    suppressClick.current = pan.current?.moved === true
+    pan.current = null
+    setDragging(false)
+  }
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLImageElement>): void => {
+    if (latest.current.zoom <= VIEWER_MIN_ZOOM) return
+    // A synthetic pointer event can arrive without usable coordinates (jsdom has
+    // no PointerEvent, and an assistive tool may omit them). Starting a pan from
+    // an undefined origin would write `translate(NaNpx, NaNpx)` and blank the
+    // picture, so such an event simply does not begin a pan.
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return
+    pan.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: latest.current.x,
+      originY: latest.current.y,
+      moved: false,
+    }
+    setDragging(true)
+    // Capture keeps the pan alive when the pointer leaves the picture. A DOM
+    // without pointer capture (jsdom) simply keeps the element handlers.
+    if (typeof event.currentTarget.setPointerCapture === 'function') {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    }
+  }
+
+  const onPointerMove = (event: ReactPointerEvent<HTMLImageElement>): void => {
+    const live = pan.current
+    if (live === null || live.pointerId !== event.pointerId) return
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return
+    const dx = event.clientX - live.startX
+    const dy = event.clientY - live.startY
+    if (!live.moved && Math.abs(dx) + Math.abs(dy) < VIEWER_DRAG_THRESHOLD) return
+    live.moved = true
+    setView((previous) => ({ ...previous, x: live.originX + dx, y: live.originY + dy }))
+  }
+
+  const onPointerEnd = (event: ReactPointerEvent<HTMLImageElement>): void => {
+    const live = pan.current
+    if (live !== null && live.pointerId === event.pointerId && typeof event.currentTarget.releasePointerCapture === 'function') {
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      } catch {
+        // The capture may already be gone; ending the pan is what matters.
+      }
+    }
+    endPan()
+  }
+
+  const onImageClick = (event: ReactMouseEvent<HTMLImageElement>): void => {
+    const suppressed = suppressClick.current
+    suppressClick.current = false
+    if (suppressed) return
+    const current = latest.current
+    zoomAt(current.zoom > VIEWER_MIN_ZOOM ? VIEWER_MIN_ZOOM : VIEWER_CLICK_ZOOM, event.clientX, event.clientY)
+  }
+
+  /** Only the backdrop itself closes: the bar and the stage are not dismissals. */
+  const onBackdropClick = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    if (event.target === event.currentTarget) onClose()
+  }
+
+  const pannable = view.zoom > VIEWER_MIN_ZOOM
+
+  return (
+    <div
+      className="agnes__lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('gallery.viewer')}
+      onClick={onBackdropClick}
+    >
+      <div className="agnes__lightboxBar">
+        <span className="agnes__lightboxZoom">{Math.round(view.zoom * 100)}%</span>
+        <button
+          type="button"
+          className="agnes__lightboxZoomOut"
+          aria-label={t('gallery.zoomOut')}
+          onClick={() => zoomFromButton(1 / VIEWER_ZOOM_STEP)}
+        >
+          <ViewerIcon>
+            <circle cx="10.5" cy="10.5" r="6.5" />
+            <path d="M7.4 10.5h6.2M16.2 16.2 21 21" />
+          </ViewerIcon>
+        </button>
+        <button
+          type="button"
+          className="agnes__lightboxZoomIn"
+          aria-label={t('gallery.zoomIn')}
+          onClick={() => zoomFromButton(VIEWER_ZOOM_STEP)}
+        >
+          <ViewerIcon>
+            <circle cx="10.5" cy="10.5" r="6.5" />
+            <path d="M7.4 10.5h6.2M10.5 7.4v6.2M16.2 16.2 21 21" />
+          </ViewerIcon>
+        </button>
+        <button
+          type="button"
+          className="agnes__lightboxReset"
+          aria-label={t('gallery.resetZoom')}
+          onClick={() => setView(VIEWER_IDENTITY)}
+        >
+          <ViewerIcon>
+            <path d="M4 9.5h5V4.5" />
+            <path d="M4.6 9.2a8 8 0 1 1-1.1 5.3" />
+          </ViewerIcon>
+        </button>
+        <a
+          className="agnes__button agnes__button--ghost"
+          href={asset.src}
+          download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
+        >
+          {t('gallery.download')}
+        </a>
+        <button type="button" className="agnes__lightboxClose" aria-label={t('gallery.close')} ref={closeRef} onClick={onClose}>
+          <ViewerIcon>
+            <path d="M6 6l12 12M18 6 6 18" />
+          </ViewerIcon>
+        </button>
+      </div>
+
+      <div
+        className={pannable ? 'agnes__lightboxStage agnes__lightboxStage--pannable' : 'agnes__lightboxStage'}
+        ref={stageRef}
+        data-panning={dragging}
+      >
+        <img
+          className="agnes__lightboxImage"
+          ref={imageRef}
+          src={asset.src}
+          alt={generation.prompt}
+          draggable={false}
+          data-dragging={dragging}
+          style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerEnd}
+          onPointerCancel={onPointerEnd}
+          onClick={onImageClick}
+        />
+      </div>
+
+      <span className="agnes__lightboxHint">{t('gallery.hint')}</span>
+    </div>
+  )
+}
+
 /** One gallery card. */
 function GenerationCard(props: {
   t: Translate
   generation: Generation
   onDelete: (id: string) => void
   onRetry: (generation: Generation) => void
+  onOpen: (generation: Generation) => void
   disabled: boolean
 }): JSX.Element {
-  const { t, generation, onDelete, onRetry, disabled } = props
+  const { t, generation, onDelete, onRetry, onOpen, disabled } = props
   const asset = generation.asset
   const isImage = generation.kind === 'image'
   const failed = generation.status === 'failed'
@@ -327,7 +652,14 @@ function GenerationCard(props: {
   return (
     <article className={failed ? 'agnes__card agnes__card--failed' : 'agnes__card'}>
       {asset !== undefined && isImage ? (
-        <img className="agnes__thumb" src={asset.src} alt={generation.prompt.slice(0, 160)} loading="lazy" />
+        <button
+          type="button"
+          className="agnes__thumbButton"
+          onClick={() => onOpen(generation)}
+          aria-label={t('gallery.viewer')}
+        >
+          <img className="agnes__thumb" src={asset.src} alt={generation.prompt.slice(0, 160)} loading="lazy" />
+        </button>
       ) : asset !== undefined ? (
         <video className="agnes__thumb" src={asset.src} controls preload="metadata" />
       ) : (
@@ -347,19 +679,22 @@ function GenerationCard(props: {
           </>
         ) : null}
         <div className="agnes__cardActions">
+          {/* The viewer replaces the old new-window link for images only: a
+              video already has a player in the card, and the lightbox is an
+              image viewer. */}
+          {asset !== undefined && isImage ? (
+            <button type="button" className="agnes__open" onClick={() => onOpen(generation)}>
+              {t('gallery.open')}
+            </button>
+          ) : null}
           {asset !== undefined ? (
-            <>
-              <a className="agnes__button agnes__button--ghost" href={asset.src} target="_blank" rel="noreferrer">
-                {isImage ? t('gallery.open') : t('gallery.download')}
-              </a>
-              <a
-                className="agnes__button agnes__button--ghost"
-                href={asset.src}
-                download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
-              >
-                {t('gallery.download')}
-              </a>
-            </>
+            <a
+              className="agnes__button agnes__button--ghost"
+              href={asset.src}
+              download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
+            >
+              {t('gallery.download')}
+            </a>
           ) : null}
           {failed && generation.retryable === true ? (
             <button type="button" className="agnes__button" disabled={disabled} onClick={() => onRetry(generation)}>
@@ -392,6 +727,16 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   const [filter, setFilter] = useState<Filter>('all')
   const [imageDraft, setImageDraft] = useState<ImageDraft>(initialImageDraft)
   const [videoDraft, setVideoDraft] = useState<VideoDraft>(initialVideoDraft)
+  /**
+   * Which generation the viewer shows, by id rather than by object.
+   *
+   * The Host owns the records, so every state refresh hands back freshly parsed
+   * objects. Holding the id keeps the viewer open across those refreshes — which
+   * matters because a generation finishing in the background rewrites the whole
+   * list — while a record that actually disappeared closes the viewer instead of
+   * leaving it on a stale picture.
+   */
+  const [viewingId, setViewingId] = useState<string | null>(null)
   // The last submitted request, so "retry" resends exactly what failed.
   const lastRequest = useRef<GenerationRequest | null>(null)
   const mounted = useRef(true)
@@ -544,6 +889,21 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   const imageCount = generations.filter((generation) => generation.kind === 'image').length
   const videoCount = generations.length - imageCount
   const disabled = busy !== null
+
+  /** The record the viewer shows; resolving by id keeps it alive across refreshes. */
+  const viewing = useMemo(
+    () => (viewingId === null ? undefined : generations.find((generation) => generation.id === viewingId)),
+    [generations, viewingId],
+  )
+  const closeViewer = useCallback(() => setViewingId(null), [])
+  const openViewer = useCallback((generation: Generation) => setViewingId(generation.id), [])
+
+  // A record can vanish under the viewer (deleted here, evicted by the history
+  // cap, cleared from another window). Leaving the overlay up would show a
+  // picture the Host no longer serves.
+  useEffect(() => {
+    if (viewingId !== null && state !== null && viewing === undefined) setViewingId(null)
+  }, [state, viewing, viewingId])
 
   const imageDimension = expectedDimensions('image', imageDraft.size, imageDraft.ratio)
   const videoDimension = expectedDimensions('video', videoDraft.size, videoDraft.ratio)
@@ -830,11 +1190,16 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
                 disabled={disabled}
                 onDelete={(id) => void deleteOne(id)}
                 onRetry={() => retry()}
+                onOpen={openViewer}
               />
             ))}
           </div>
         )}
       </section>
+
+      {viewing !== undefined && viewing.kind === 'image' && viewing.asset !== undefined ? (
+        <ImageViewer t={t} generation={viewing} asset={viewing.asset} onClose={closeViewer} />
+      ) : null}
 
       <span className="agnes__hint">{t('hint.key')}</span>
     </div>

@@ -245,12 +245,22 @@ try {
     assert.equal(refused.code, 'agnes-studio/bad-request', `an unsupported size must be refused at the route, got ${refused.code}`)
     checks.push('api-refuses-invalid-envelope')
 
+    //    A wrong model for the capability is refused too — but only once the key
+    //    check has passed, because an unconfigured profile must report the
+    //    actionable cause (no key) rather than an internal validation detail. So
+    //    the expected code depends on the configuration state, and both are real
+    //    refusals that never reach Agnes.
     const badModel = await rpcExpectError(origin, cookie, {
       action: 'generate',
       request: { kind: 'image', prompt: 'x', model: 'agnes-video-2.5', size: '1K', ratio: '1:1', references: [] },
     })
-    assert.equal(badModel.code, 'agnes-studio/invalid-model', 'a video model must be refused for an image request')
-    checks.push('api-refuses-wrong-model')
+    const expectedModelCode = state.configured === true ? 'agnes-studio/invalid-model' : 'agnes-studio/not-configured'
+    assert.equal(
+      badModel.code,
+      expectedModelCode,
+      `a video model must be refused for an image request (configured=${String(state.configured)}), got ${badModel.code}`,
+    )
+    checks.push(`api-refuses-wrong-model: ${badModel.code}`)
 
     // 3. The media route must 404 an unknown id and stay inside the auth fence.
     // The id rides in `?id=`; a `/media/<uuid>` pathname would 404 for the wrong

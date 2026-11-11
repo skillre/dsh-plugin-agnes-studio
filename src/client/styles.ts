@@ -174,6 +174,102 @@ select.agnes__field { cursor: pointer; }
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
+
+/* The thumbnail is the second way into the viewer.
+   It wraps the existing <img>/<video> instead of adding a second control: a
+   click on the picture is the gesture users already try, and the card keeps
+   exactly one .agnes__open button for the accessible, keyboard-reachable path. */
+.agnes__thumbButton {
+  appearance: none; display: block; width: 100%; padding: 0; margin: 0;
+  border: 0; background: transparent; cursor: zoom-in; position: relative;
+  color: inherit; font: inherit; line-height: 0;
+}
+.agnes__thumbButton:focus-visible { outline: 2px solid ${ACCENT_IMAGE}; outline-offset: -2px; }
+.agnes__thumbButton:disabled { cursor: default; }
+/* The open button replaces the old new-window link. Same visual weight as the
+   download control beside it, but it is a button: the link went nowhere in the
+   Desktop shell (the window-open handler denies every popup), so the panel now
+   owns the zoom itself. */
+.agnes__open {
+  appearance: none; cursor: pointer; border-radius: 9px;
+  border: 1px solid transparent; background: transparent; color: inherit;
+  font: inherit; font-size: 11px; font-weight: 500; padding: 4px 9px;
+  opacity: 0.75; transition: background 120ms ease, opacity 120ms ease;
+}
+.agnes__open:hover:not(:disabled) { opacity: 1; background: color-mix(in srgb, currentColor 9%, transparent); }
+.agnes__open:disabled { opacity: 0.45; cursor: not-allowed; }
+.agnes__open:focus-visible { outline: 2px solid ${ACCENT_IMAGE}; outline-offset: 2px; }
+
+/* The in-panel lightbox.
+   Rendered in the component tree with position: fixed rather than through a
+   portal: the browser bundle's envelope can only resolve react, so importing
+   react-dom would break module loading. A fixed overlay is enough because the
+   panel's own scroll container establishes no containing block for it.
+   Colors here are deliberately literal black/white: the sheet sits on top of the
+   whole app in both themes, and a theme token would make the backdrop follow the
+   page instead of dimming it. */
+.agnes__lightbox {
+  position: fixed; inset: 0; z-index: 2147483000;
+  display: flex; flex-direction: column;
+  background: rgba(0, 0, 0, 0.82);
+  color: #fff;
+  animation: agnes-lightbox-in 120ms ease-out both;
+}
+@keyframes agnes-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
+
+.agnes__lightboxBar {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  flex: none; padding: 10px 14px; color: #fff;
+}
+.agnes__lightboxBar .agnes__button {
+  border-color: rgba(255, 255, 255, 0.32); color: #fff; background: transparent;
+}
+.agnes__lightboxBar .agnes__button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
+.agnes__lightboxBar .agnes__button:focus-visible { outline-color: #fff; }
+.agnes__lightboxBar .agnes__button--ghost { opacity: 0.85; }
+.agnes__lightboxBar .agnes__button--ghost:hover:not(:disabled) { opacity: 1; }
+
+.agnes__lightboxZoom {
+  min-width: 46px; text-align: right;
+  font-size: 11px; font-variant-numeric: tabular-nums;
+  opacity: 0.78; letter-spacing: 0.02em;
+}
+
+.agnes__lightboxStage {
+  flex: 1; min-height: 0;
+  display: grid; place-items: center;
+  overflow: hidden;
+  cursor: zoom-in;
+  touch-action: none;
+}
+.agnes__lightboxStage--pannable { cursor: grab; }
+.agnes__lightboxStage--pannable[data-panning="true"] { cursor: grabbing; }
+
+.agnes__lightboxImage {
+  display: block;
+  max-width: 92vw; max-height: 82vh;
+  object-fit: contain;
+  user-select: none; -webkit-user-select: none;
+  -webkit-user-drag: none;
+  touch-action: none;
+  transform-origin: center center;
+  will-change: transform;
+  transition: transform 140ms ease-out;
+  cursor: inherit;
+}
+/* While a pointer drag is live the transform is written every frame, so a
+   transition would make the picture lag the cursor. */
+.agnes__lightboxImage[data-dragging="true"] { transition: none; }
+
+.agnes__lightboxHint {
+  flex: none; padding: 0 14px 12px; text-align: center;
+  font-size: 11px; color: #fff; opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agnes__lightbox { animation: none; }
+  .agnes__lightboxImage { transition: none; }
+}
 `
 
 /** Render the panel stylesheet as a React element. */

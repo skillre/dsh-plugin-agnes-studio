@@ -11,11 +11,13 @@
  */
 
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
+import { seedImageGeneration } from './seed-fixture.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await readFile(join(repo, 'package.json'), 'utf8'))
@@ -57,10 +59,24 @@ async function shutdown() {
     await Promise.race([new Promise((res) => app.once('close', res)), delay(3000)])
     if (app.exitCode === null) app.kill('SIGKILL')
   }
+  // Wait for the child to actually be reaped before deleting its home.
+  //
+  // A single `rm -rf` raced the dying process once and left a re-created
+  // `home/storages/...` directory behind: DSH flushed a session cache file after
+  // the removal had walked past it. The leftover survived into the next run and
+  // looked like a leaked profile. Retry the removal until the tree is really
+  // gone, and fail loudly if it never is.
+  await delay(1000)
   try {
     const marker = await readFile(join(owned, '.owned'), 'utf8')
     if (marker.trim() !== owned) throw new Error('owned marker mismatch')
-    await rm(owned, { recursive: true, force: true })
+    let removed = false
+    for (let attempt = 0; attempt < 5 && !removed; attempt += 1) {
+      await rm(owned, { recursive: true, force: true })
+      removed = !existsSync(owned)
+      if (!removed) await delay(500)
+    }
+    if (!removed) throw new Error(`owned root survived removal: ${owned}`)
     process.stdout.write(`cleaned ${owned}\n`)
   } catch (error) {
     process.stderr.write(`cleanup failed: ${error.message}\n`)
@@ -76,6 +92,17 @@ try {
   await run(['plugin', '--profile', profile, 'add', tarball, '--ignore-scripts', '--store-dir', join(owned, 'pnpm-store')])
   const dump = await run(['--profile', profile, '--dump-config'])
   if (!dump.includes('skillre-agnes-studio')) throw new Error('bundle row did not compose')
+
+  // Seed one finished image generation so the driver can exercise the gallery
+  // card and its viewer without calling the live Agnes API. The bundle's default
+  // `dataDir` is empty, which the Host resolves to `$DSH_HOME/agnes-studio`; this
+  // harness sets DSH_HOME, so the fixture lands inside the owned root and is
+  // deleted with it. Seeding before boot means the panel's first `state` call
+  // already sees the record, so the driver never races a late write.
+  const dataDir = join(home, 'agnes-studio')
+  const seeded = await seedImageGeneration(dataDir)
+  process.stdout.write(`seeded ${seeded.id} (${String(seeded.asset.bytes)} bytes) into ${dataDir}\n`)
+
   app = spawn(cli, ['--profile', profile, '--port', '0', '--no-open'], { cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'] })
   let text = ''
   const append = (data) => { text += data.toString() }
@@ -93,7 +120,23 @@ try {
     inspect()
   })
   await writeFile(join(repo, '.preview-url.txt'), `${url}\n`, 'utf8')
-  await writeFile(join(repo, '.preview-state.json'), `${JSON.stringify({ owned, profile, url: url.replace(/token=[^&]+/, 'token=[redacted]') }, null, 2)}\n`, 'utf8')
+  await writeFile(
+    join(repo, '.preview-state.json'),
+    `${JSON.stringify(
+      {
+        owned,
+        profile,
+        url: url.replace(/token=[^&]+/, 'token=[redacted]'),
+        dataDir,
+        // The driver asserts against this exact record, so it must not guess the id.
+        fixtureId: seeded.id,
+        fixtureBytes: seeded.asset.bytes,
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  )
   process.stdout.write(`ready: ${profile} (url written)\n`)
   while (true) {
     if (await readFile(join(repo, '.preview-stop'), 'utf8').then(() => true, () => false)) break

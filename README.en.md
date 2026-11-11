@@ -5,7 +5,10 @@
 Generate images and video with Agnes' free models, from two entry points:
 
 - **Sidebar panel**: click "Agnes Studio" in the DSH left sidebar, write a prompt, tune the
-  parameters, and keep the results in the gallery.
+  parameters, and keep the results in the gallery. "Open original" on a result — or a click on the
+  thumbnail — opens an in-panel viewer: scroll to zoom, drag to pan, click the picture to toggle
+  between fit and 2x, and press Escape or click the backdrop to close. The panel never opens a popup
+  or leaves the app.
 - **Session tools**: just say "draw a …" or "generate a … video". The model calls `agnes_image` /
   `agnes_video`, and an image arrives in the conversation as a real DSH image block.
 
@@ -102,6 +105,9 @@ the command above if you no longer want the files.
 - `agnes-video-2.5-flash` accepts no reference video and at most 5 reference images (`2.5` takes 8).
 - Generations are **local** and do not sync across machines; records past `historyLimit` are deleted.
 - The panel runs one task at a time, so a double submit cannot double the cost or deepen the queue.
+- The image viewer zooms **inside the panel** and never opens the system image viewer or a new
+  window: generated media is stored locally behind session authentication, so handing it to an
+  external program would both answer 401 and bypass DSH's window policy.
 - One `dataDir` belongs to one plugin instance: index writes are serialized per handle, so two
   instances pointed at the same directory can still overwrite each other.
 - Images enter the conversation as DSH attachments; a video returns a same-origin URL and the
@@ -111,13 +117,17 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 129 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 137 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering,
-  and the SHIPPED client bundle (loaded and rendered through the real loader envelope).
+  image-viewer interaction, and the SHIPPED client bundle (loaded and rendered through the real loader
+  envelope).
 - Packed tarball installed into a disposable isolated profile: `--dump-config` composition, bounded
   real startup, authenticated `/api` calls, a real image generation downloaded through the media
-  route, records and files surviving a restart, and the file disappearing after deletion. Evidence is
-  in `docs/evidence/`.
+  route, records and files surviving a restart, and the file disappearing after deletion.
+- Real headless Chrome driving the DSH Web app: sidebar entry, panel render, model-derived controls on
+  both capability tabs, Flash narrowing the resolution list, the gallery card, and the image viewer
+  (spans the viewport, zoom changes the measured layout, closes on Escape and on a backdrop click, and
+  does not close when the picture is clicked) — 21 checks. Evidence is in `docs/evidence/`.
 
 ## Development
 
