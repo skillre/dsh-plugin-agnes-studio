@@ -1,0 +1,33 @@
+# One Host row for this bundle. The Host half owns the API key resolution, the
+# generation store, the upstream Agnes calls and the two authenticated Connection
+# routes; the Client half of the same package registers the sidebar entry and the
+# studio page.
+#
+# Every config key is optional and schema-validated at mount time; the user's
+# profile may override this row's configuration (see README). The API key is
+# deliberately NOT here: it is a secret, resolved through DSH credentials (or the
+# AGNES_API_KEY environment variable) at each operation.
+- insert:
+    - id: skillre-agnes-studio
+      name: '@skillre/dsh-plugin-agnes-studio'
+      config:
+        # Agnes API root, without a trailing slash.
+        baseUrl: https://apihub.agnes-ai.com/v1
+        # Credential reference resolved through the DSH credentials service.
+        credentialRef: AGNES_API_KEY
+        # Fallback environment variable when the credential store is empty.
+        apiKeyEnv: AGNES_API_KEY
+        # Generation index and media files. Empty follows $DSH_HOME/agnes-studio
+        # (falling back to ~/.dsh/agnes-studio), which keeps an isolated profile's
+        # data inside that profile. Must be a directory this plugin owns.
+        dataDir: ''
+        # Register the agnes_image / agnes_video model tools.
+        enableTools: true
+        # How many generations to keep; older ones and their files are evicted.
+        historyLimit: 200
+        # Image generation timeout (the upstream docs recommend 60-360 s).
+        imageTimeoutMs: 360000
+        # Whole video task timeout, including queue wait.
+        videoTimeoutMs: 900000
+        # Poll interval while a video task runs.
+        pollIntervalMs: 2000

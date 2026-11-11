@@ -1,0 +1,20 @@
+{
+  "at": "2026-11-11T04:14:06.537Z",
+  "dsh": "unknown",
+  "checks": [
+    "browser-app-boot",
+    "browser-sidebar-entry: Agnes 工作室",
+    "browser-panel-renders: Agnes 工作室",
+    "browser-no-render-error",
+    "browser-config-state: 密钥来自 DSH 凭据上游可用模型：10 个",
+    "browser-image-form-controls: 3 selects",
+    "browser-video-form-controls: 720P/1080P/1K/2K",
+    "browser-flash-narrows-sizes: 720P",
+    "browser-refuses-empty-prompt: 请先填写提示词",
+    "browser-gallery-empty-state: 生成记录",
+    "browser-theme-toggle: rgb(15, 17, 21)",
+    "browser-locale-dictionary: Agnes 工作室",
+    "display-detail-image: docs/DETAIL*.md + docs/preview*.svg present in the packed tarball",
+    "browser-console-clean"
+  ]
+}

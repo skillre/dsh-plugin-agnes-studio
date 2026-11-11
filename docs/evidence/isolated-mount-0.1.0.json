@@ -1,0 +1,58 @@
+{
+  "package": "@skillre/dsh-plugin-agnes-studio",
+  "version": "0.1.0",
+  "dsh": "0.2.2-rc.1",
+  "tarball": {
+    "path": "/Users/skillre/dsh-plugins/repos/dsh-plugin-agnes-studio/skillre-dsh-plugin-agnes-studio-0.1.0.tgz",
+    "sha256": "b5b175ff19d823af0a6e4129d8887951368edb04bb6f901edaf0d269a9bf3b41"
+  },
+  "profile": "agnes-studio-test-bbe0a19f",
+  "checks": [
+    "command: dsh --version -> exit 0",
+    "dsh-version",
+    "command: dsh --profile agnes-studio-test-bbe0a19f --from-default-profile web --dump-config -> exit 0",
+    "profile-template-created",
+    "command: dsh plugin --profile agnes-studio-test-bbe0a19f add /Users/skillre/dsh-plugins/repos/dsh-plugin-agnes-studio/skillre-dsh-plugin-agnes-studio-0.1.0.tgz --ignore-scripts --store-dir /private/var/folders/k5/plnkf7qs5992_9713c_b34nc0000gn/T/dsh-agnes-studio-mount-ozycZw/pnpm-store -> exit 0",
+    "profile-tarball-install",
+    "packed-dependency-and-selection",
+    "command: dsh --profile agnes-studio-test-bbe0a19f --dump-config -> exit 0",
+    "dump-config",
+    "packed-payload-present",
+    "bounded-startup",
+    "api-state",
+    "api-refuses-invalid-envelope",
+    "api-refuses-wrong-model",
+    "api-media-unknown-404",
+    "api-auth-fence",
+    "tools-enabled-by-config",
+    "api-generate-image",
+    "api-media-bytes",
+    "storage-persistence-across-restart",
+    "storage-artifact-across-restart",
+    "api-delete-removes-file"
+  ],
+  "endpoint": {
+    "state": {
+      "configured": true,
+      "keySource": "credential",
+      "models": 10
+    },
+    "generate": {
+      "id": "31e0a181-7d7d-4f89-8ba2-521472091ff0",
+      "mediaType": "image/png",
+      "bytes": 1015370,
+      "durationMs": 13372
+    },
+    "media": {
+      "bytes": 1015370,
+      "contentType": "image/png"
+    }
+  },
+  "cleanup": {
+    "ownedRoot": "/private/var/folders/k5/plnkf7qs5992_9713c_b34nc0000gn/T/dsh-agnes-studio-mount-ozycZw",
+    "profile": "agnes-studio-test-bbe0a19f",
+    "processesStopped": true,
+    "rootRemoved": true,
+    "verified": true
+  }
+}

@@ -1,0 +1,425 @@
+/**
+ * Offline tests for the store, the runtime and the two Connection routes.
+ *
+ * The store is the only thing that writes user data, so its eviction, atomic
+ * index write and path-traversal refusal are asserted directly against a real
+ * temporary directory. The runtime and routes are exercised with a fake client,
+ * so no test reaches the network.
+ */
+
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { openStore, isStoreId, newGenerationId } from '../src/store.js'
+import { createRuntime, defaultRequest } from '../src/runtime.js'
+import type { AgnesClient, ClientDeps } from '../src/agnes.js'
+import { createExecuteRoute, createMediaRoute, parseRange, EXECUTE_PATH } from '../src/transport.js'
+import { MEDIA_PATH, mediaIdFrom, mediaPathFor, type Generation, type GenerationRequest } from '../src/types.js'
+
+/** A small PNG stand-in; the store never parses it. */
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02])
+
+let dataDir = ''
+
+beforeEach(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), 'agnes-studio-test-'))
+})
+
+afterEach(async () => {
+  await rm(dataDir, { recursive: true, force: true })
+})
+
+/** A generation record for direct store tests. */
+function record(patch: Partial<Generation> = {}): Generation {
+  return {
+    id: newGenerationId(),
+    kind: 'image',
+    status: 'succeeded',
+    model: 'agnes-image-2.5-flash',
+    prompt: 'a red apple',
+    params: { size: '1K' },
+    createdAt: new Date().toISOString(),
+    ...patch,
+  }
+}
+
+/** A fake client whose behaviour each test controls. */
+function fakeClient(overrides: Partial<AgnesClient> = {}): AgnesClient {
+  return {
+    generateImage: async () => ({ bytes: PNG, mediaType: 'image/png' }),
+    generateVideo: async () => ({ bytes: new Uint8Array([0, 0, 0, 0]), mediaType: 'video/mp4', upstreamId: 'video_1' }),
+    listModels: async () => ({ models: ['agnes-image-2.5-flash'] }),
+    ...overrides,
+  }
+}
+
+/** Build a runtime over the temp directory with an injected client. */
+async function runtimeWith(client: AgnesClient, options: { key?: string } = {}) {
+  const store = await openStore(dataDir, 5)
+  return createRuntime({
+    store,
+    baseUrl: 'https://apihub.agnes-ai.com/v1',
+    resolveKey: async () => {
+      const key = options.key ?? 'sk-test'
+      if (key === '') throw new Error('no key')
+      return { key, source: 'credential' as const }
+    },
+    imageTimeoutMs: 1000,
+    videoTimeoutMs: 1000,
+    pollIntervalMs: 1,
+    maxMediaBytes: 1024 * 1024,
+    clientFactory: () => client,
+  })
+}
+
+describe('store', () => {
+  it('issues UUID-shaped ids and refuses anything else as a path', async () => {
+    const id = newGenerationId()
+    expect(isStoreId(id)).toBe(true)
+    expect(isStoreId('../../etc/passwd')).toBe(false)
+    expect(isStoreId('')).toBe(false)
+  })
+
+  it('appends, lists newest first and reads the bytes back', async () => {
+    const store = await openStore(dataDir, 5)
+    const first = await store.append(record(), PNG, 'image/png')
+    const second = await store.append(record({ prompt: 'second' }), PNG, 'image/png')
+    expect(first.asset?.mediaType).toBe('image/png')
+    expect(first.asset?.bytes).toBe(PNG.byteLength)
+    expect(first.asset?.src).toBe(mediaPathFor(first.id))
+    const list = await store.list()
+    expect(list.map((entry) => entry.id)).toEqual([second.id, first.id])
+    const media = await store.readMedia(first.id)
+    expect(media?.mediaType).toBe('image/png')
+    expect(Array.from(media?.bytes ?? [])).toEqual(Array.from(PNG))
+  })
+
+  it('refuses a traversal id without touching the filesystem', async () => {
+    const store = await openStore(dataDir, 5)
+    expect(await store.readMedia('../../etc/passwd')).toBeUndefined()
+    expect(await store.readMedia('not-a-uuid')).toBeUndefined()
+  })
+
+  it('evicts the oldest record and its file past the cap', async () => {
+    const store = await openStore(dataDir, 2)
+    const a = await store.append(record({ prompt: 'a' }), PNG, 'image/png')
+    const b = await store.append(record({ prompt: 'b' }), PNG, 'image/png')
+    const c = await store.append(record({ prompt: 'c' }), PNG, 'image/png')
+    const list = await store.list()
+    expect(list.map((entry) => entry.id)).toEqual([c.id, b.id])
+    expect(await store.readMedia(a.id)).toBeUndefined()
+    // The evicted artifact file must be gone too, not just its index entry.
+    const files = await readdir(join(dataDir, 'media'))
+    expect(files.some((name) => name.startsWith(a.id))).toBe(false)
+  })
+
+  it('removes one record and clears everything', async () => {
+    const store = await openStore(dataDir, 5)
+    const a = await store.append(record(), PNG, 'image/png')
+    const b = await store.append(record(), PNG, 'image/png')
+    expect(await store.remove(a.id)).toBe(true)
+    expect(await store.remove(a.id)).toBe(false)
+    expect((await store.list()).map((entry) => entry.id)).toEqual([b.id])
+    expect(await store.clear()).toBe(1)
+    expect(await store.list()).toEqual([])
+  })
+
+  it('keeps every record under concurrent appends', async () => {
+    // The index is one document, so read-modify-write must be serialized. A
+    // measured run of 20 concurrent appends kept exactly 1 record before this
+    // was fixed — the second write erased the first record.
+    const store = await openStore(dataDir, 100)
+    const appends = Array.from({ length: 20 }, () => store.append(record(), PNG, 'image/png'))
+    const results = await Promise.all(appends)
+    const list = await store.list()
+    expect(results).toHaveLength(20)
+    expect(list).toHaveLength(20)
+    expect(new Set(list.map((entry) => entry.id)).size).toBe(20)
+    // Every artifact must still be readable, not just listed.
+    for (const entry of list) expect(await store.readMedia(entry.id)).toBeDefined()
+  })
+
+  it('keeps the chain alive after a failed write', async () => {
+    const store = await openStore(dataDir, 100)
+    // Removing an absent record is a no-op, not a failure; the point is that a
+    // settled rejection must not poison later writes.
+    await store.remove(newGenerationId())
+    const next = await store.append(record(), PNG, 'image/png')
+    expect((await store.list()).map((entry) => entry.id)).toEqual([next.id])
+  })
+
+  it('survives a corrupt index instead of failing every request', async () => {
+    const store = await openStore(dataDir, 5)
+    await store.append(record(), PNG, 'image/png')
+    // Corrupt the index the way a truncated write would.
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(join(dataDir, 'index.json'), '{ not json', 'utf8')
+    expect(await store.list()).toEqual([])
+    // The store stays usable afterwards.
+    const next = await store.append(record(), PNG, 'image/png')
+    expect((await store.list()).map((entry) => entry.id)).toEqual([next.id])
+  })
+
+  it('only hands image paths to the tool layer, never a video path', async () => {
+    const store = await openStore(dataDir, 5)
+    const image = await store.append(record(), PNG, 'image/png')
+    const video = await store.append(record({ kind: 'video' }), new Uint8Array([1, 2]), 'video/mp4')
+    expect(await store.mediaPath(image.id)).toContain(image.id)
+    expect(await store.mediaPath(video.id)).toBeUndefined()
+  })
+})
+
+describe('runtime', () => {
+  it('stores a successful image generation with its timing', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const generation = await runtime.generate(defaultRequest('image', 'a red apple'))
+    expect(generation.status).toBe('succeeded')
+    expect(generation.asset?.mediaType).toBe('image/png')
+    expect(generation.durationMs).toBeGreaterThanOrEqual(0)
+    expect((await runtime.state()).generations).toHaveLength(1)
+  })
+
+  it('reports configuration state without leaking the key', async () => {
+    const configured = await runtimeWith(fakeClient())
+    const state = await configured.state()
+    expect(state.configured).toBe(true)
+    expect(state.keySource).toBe('credential')
+    expect(JSON.stringify(state)).not.toContain('sk-test')
+
+    const missing = await runtimeWith(fakeClient(), { key: '' })
+    const unconfigured = await missing.state()
+    expect(unconfigured.configured).toBe(false)
+    expect(unconfigured.keySource).toBe('none')
+  })
+
+  it('refuses to generate when no key is configured', async () => {
+    const runtime = await runtimeWith(fakeClient(), { key: '' })
+    await expect(runtime.generate(defaultRequest('image', 'x'))).rejects.toMatchObject({ code: 'not-configured' })
+    // A refused request must not leave a record behind.
+    expect((await runtime.state()).generations).toEqual([])
+  })
+
+  it('records a retryable failure so the panel can offer a retry', async () => {
+    const failing = fakeClient({
+      generateVideo: async () => {
+        const error = new Error('queue full') as Error & { code: string; retryable: boolean }
+        error.code = 'queue-full'
+        error.retryable = true
+        const { StudioError } = await import('../src/errors.js')
+        throw new StudioError('queue-full', '队列已满', {}, true)
+      },
+    })
+    const runtime = await runtimeWith(failing)
+    await expect(runtime.generate(defaultRequest('video', 'x'))).rejects.toMatchObject({ code: 'queue-full' })
+    const state = await runtime.state()
+    expect(state.generations).toHaveLength(1)
+    expect(state.generations[0]?.status).toBe('failed')
+    expect(state.generations[0]?.retryable).toBe(true)
+  })
+
+  it('records a retryable failure without inventing a media asset', async () => {
+    // A failed generation has no bytes. Writing an empty
+    // `application/octet-stream` asset made the panel render a broken <video>.
+    const store = await openStore(dataDir, 10)
+    const failed: Generation = record({ status: 'failed', errorCode: 'queue-full', error: '队列已满', retryable: true })
+    const stored = await store.append(failed, new Uint8Array(0), 'application/octet-stream')
+    expect(stored.asset).toBeUndefined()
+    expect(stored.error).toBe('队列已满')
+    expect(await store.readMedia(stored.id)).toBeUndefined()
+    const files = await readdir(join(dataDir, 'media'))
+    expect(files).toHaveLength(0)
+  })
+
+  it('does not store a transient non-retryable failure as history', async () => {
+    const failing = fakeClient({
+      generateImage: async () => {
+        const { StudioError } = await import('../src/errors.js')
+        throw new StudioError('invalid-parameter', 'bad size')
+      },
+    })
+    const runtime = await runtimeWith(failing)
+    await expect(runtime.generate(defaultRequest('image', 'x'))).rejects.toMatchObject({ code: 'invalid-parameter' })
+    expect((await runtime.state()).generations).toEqual([])
+  })
+
+  it('maps an unexpected throw to an internal failure', async () => {
+    const runtime = await runtimeWith(
+      fakeClient({
+        generateImage: async () => {
+          throw new Error('kaboom')
+        },
+      }),
+    )
+    await expect(runtime.generate(defaultRequest('image', 'x'))).rejects.toMatchObject({ code: 'internal' })
+  })
+
+  it('builds a default request that the capability table accepts', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    expect((await runtime.generate(defaultRequest('image', 'x'))).kind).toBe('image')
+    expect((await runtime.generate(defaultRequest('video', 'x'))).kind).toBe('video')
+  })
+})
+
+describe('routes', () => {
+  /** Send one RPC envelope through the execute route. */
+  async function rpc(runtime: Awaited<ReturnType<typeof runtimeWith>>, payload: unknown): Promise<{ status: number; body: unknown }> {
+    const route = createExecuteRoute(runtime)
+    const request = new Request(`http://127.0.0.1:56873${EXECUTE_PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'rpc-1', method: 'agnes-studio', payload }),
+    })
+    const response = await route.fetch(request)
+    return { status: response.status, body: await response.json() }
+  }
+
+  it('answers a state request with the state document', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const { status, body } = await rpc(runtime, { action: 'state' })
+    expect(status).toBe(200)
+    expect(body).toMatchObject({ type: 'server-response', rpcId: 'rpc-1', result: { ok: true } })
+  })
+
+  it('rejects a non-JSON body and an unknown method inside the envelope', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const route = createExecuteRoute(runtime)
+    const badContent = await route.fetch(
+      new Request(`http://127.0.0.1:56873${EXECUTE_PATH}`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'x' }),
+    )
+    expect(badContent.status).toBe(415)
+
+    const wrongMethod = await route.fetch(
+      new Request(`http://127.0.0.1:56873${EXECUTE_PATH}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'client-request', rpcId: 'r', method: 'other', payload: {} }),
+      }),
+    )
+    const parsed = (await wrongMethod.json()) as { result: { ok: boolean; error: { code: string } } }
+    expect(parsed.result.ok).toBe(false)
+    expect(parsed.result.error.code).toContain('bad-request')
+  })
+
+  it('reports a StudioError with its own code, never an internal fault', async () => {
+    const runtime = await runtimeWith(fakeClient(), { key: '' })
+    const { body } = await rpc(runtime, { action: 'generate', request: defaultRequest('image', 'x') })
+    const parsed = body as { result: { ok: boolean; error: { code: string } } }
+    expect(parsed.result.ok).toBe(false)
+    expect(parsed.result.error.code).toBe('agnes-studio/not-configured')
+  })
+
+  it('serves stored media over the media route with no-store-safe headers', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const generation = await runtime.generate(defaultRequest('image', 'x'))
+    const route = createMediaRoute(runtime)
+    const response = await route.fetch(new Request(`http://127.0.0.1:56873${mediaPathFor(generation.id)}`, { method: 'GET' }))
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('image/png')
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(PNG)
+
+    const head = await route.fetch(new Request(`http://127.0.0.1:56873${mediaPathFor(generation.id)}`, { method: 'HEAD' }))
+    expect(head.status).toBe(200)
+  })
+
+  it('404s an unknown id and a traversal attempt in the query string', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const route = createMediaRoute(runtime)
+    const unknown = await route.fetch(
+      new Request(`http://127.0.0.1:56873${mediaPathFor(newGenerationId())}`, { method: 'GET' }),
+    )
+    expect(unknown.status).toBe(404)
+    // The traversal must be attempted through `?id=`, which is the only input
+    // this route reads; a `/media/../..` pathname merely fails to match.
+    const traversal = await route.fetch(
+      new Request(`http://127.0.0.1:56873/api/agnes-studio/media?id=${encodeURIComponent('../../etc/passwd')}`, { method: 'GET' }),
+    )
+    expect(traversal.status).toBe(404)
+    const dotdot = await route.fetch(
+      new Request('http://127.0.0.1:56873/api/agnes-studio/media?id=..%2F..%2Fetc%2Fpasswd', { method: 'GET' }),
+    )
+    expect(dotdot.status).toBe(404)
+  })
+})
+
+describe('media route path shape', () => {
+  it('uses one exact pathname with the id in the query, which the registry can match', async () => {
+    // Connection keys exact Fetch routes by `new URL(url).pathname`, so a
+    // `/media/<id>` URL can never reach the handler. This asserts the contract
+    // the registry actually enforces.
+    const id = newGenerationId()
+    const url = new URL(mediaPathFor(id), 'http://127.0.0.1:56873')
+    expect(url.pathname).toBe(MEDIA_PATH)
+    expect(url.searchParams.get('id')).toBe(id)
+    expect(mediaIdFrom(url.search)).toBe(id)
+  })
+
+  it('rejects a malformed or absent id', () => {
+    expect(mediaIdFrom('')).toBeUndefined()
+    expect(mediaIdFrom('?id=')).toBeUndefined()
+    expect(mediaIdFrom('?other=1')).toBeUndefined()
+  })
+
+  it('serves bytes at the exact registered path', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const generation = await runtime.generate(defaultRequest('image', 'x'))
+    const route = createMediaRoute(runtime)
+    expect(route.path).toBe(MEDIA_PATH)
+    const url = `http://127.0.0.1:56873${generation.asset?.src ?? ''}`
+    expect(new URL(url).pathname).toBe(MEDIA_PATH)
+    const response = await route.fetch(new Request(url, { method: 'GET' }))
+    expect(response.status).toBe(200)
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(PNG)
+  })
+})
+
+describe('range support', () => {
+  it('parses the range forms a media element sends', () => {
+    expect(parseRange(null, 100)).toBeUndefined()
+    expect(parseRange('bytes=0-9', 100)).toEqual({ start: 0, end: 9 })
+    expect(parseRange('bytes=90-', 100)).toEqual({ start: 90, end: 99 })
+    // A suffix range asks for the last N bytes.
+    expect(parseRange('bytes=-10', 100)).toEqual({ start: 90, end: 99 })
+    // An end past the payload is clamped, not refused.
+    expect(parseRange('bytes=90-500', 100)).toEqual({ start: 90, end: 99 })
+    expect(parseRange('bytes=100-', 100)).toBe('unsatisfiable')
+    // Malformed headers fall back to the whole body.
+    expect(parseRange('bytes=abc', 100)).toBeUndefined()
+    expect(parseRange('items=0-1', 100)).toBeUndefined()
+  })
+
+  it('answers a satisfiable range with 206 and the exact slice', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const generation = await runtime.generate(defaultRequest('image', 'x'))
+    const route = createMediaRoute(runtime)
+    const response = await route.fetch(
+      new Request(`http://127.0.0.1:56873${mediaPathFor(generation.id)}`, { method: 'GET', headers: { range: 'bytes=0-3' } }),
+    )
+    expect(response.status).toBe(206)
+    expect(response.headers.get('content-range')).toBe(`bytes 0-3/${String(PNG.byteLength)}`)
+    expect(response.headers.get('accept-ranges')).toBe('bytes')
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(PNG.subarray(0, 4))
+  })
+
+  it('answers an unsatisfiable range with 416', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const generation = await runtime.generate(defaultRequest('image', 'x'))
+    const route = createMediaRoute(runtime)
+    const response = await route.fetch(
+      new Request(`http://127.0.0.1:56873${mediaPathFor(generation.id)}`, { method: 'GET', headers: { range: 'bytes=99999-' } }),
+    )
+    expect(response.status).toBe(416)
+    expect(response.headers.get('content-range')).toBe(`bytes */${String(PNG.byteLength)}`)
+  })
+})
+
+describe('request defaults', () => {
+  it('produces requests that survive validation', async () => {
+    const { validateRequest } = await import('../src/agnes.js')
+    const image = defaultRequest('image', 'x') as GenerationRequest
+    const video = defaultRequest('video', 'x') as GenerationRequest
+    expect(() => validateRequest(image)).not.toThrow()
+    expect(() => validateRequest(video)).not.toThrow()
+  })
+})

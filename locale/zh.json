@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Agnes 工作室",
+    "description": "用 Agnes 免费模型生成图片和视频：侧栏看板里调参数出图出片，会话里还能直接调用 agnes_image 与 agnes_video 工具。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

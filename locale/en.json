@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Agnes Studio",
+    "description": "Generate images and video with Agnes' free models, from a sidebar panel or the agnes_image / agnes_video session tools.",
+    "detail": "docs/DETAIL.md"
+  }
+}

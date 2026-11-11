@@ -1,0 +1,1 @@
+![Agnes Studio: a sidebar entry opens a panel with an image/video toggle, a prompt field and a result gallery; the same capability is callable in a session as agnes_image and agnes_video](preview.svg)
