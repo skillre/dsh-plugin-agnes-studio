@@ -16,7 +16,15 @@ import { createRuntime, defaultRequest } from '../src/runtime.js'
 import { StudioError } from '../src/errors.js'
 import type { AgnesClient, ClientDeps } from '../src/agnes.js'
 import { createExecuteRoute, createMediaRoute, parseRange, EXECUTE_PATH } from '../src/transport.js'
-import { MEDIA_PATH, mediaIdFrom, mediaPathFor, type Generation, type GenerationRequest } from '../src/types.js'
+import {
+  MEDIA_PATH,
+  mediaIdFrom,
+  mediaPathFor,
+  type Generation,
+  type GenerationRequest,
+  type ImageRequest,
+  type VideoRequest,
+} from '../src/types.js'
 
 /** A small PNG stand-in; the store never parses it. */
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02])
@@ -61,6 +69,18 @@ function record(patch: Partial<Generation> = {}): Generation {
     params: { size: '1K' },
     createdAt: new Date().toISOString(),
     ...patch,
+  }
+}
+
+/** An image request that continues an already-stored picture. */
+function continueRequest(sourceId: string, prompt = 'paint the apple blue'): ImageRequest {
+  return {
+    kind: 'image',
+    prompt,
+    model: 'agnes-image-2.5-flash',
+    size: '1K',
+    ratio: '1:1',
+    references: [{ kind: 'image', generationId: sourceId }],
   }
 }
 
@@ -530,6 +550,93 @@ describe('runtime', () => {
   })
 })
 
+describe('continue editing', () => {
+  it('inlines a stored picture as a data: URI and records the lineage', async () => {
+    // The panel can only address generated media through the authenticated
+    // same-origin route, which the upstream cannot fetch. The Host therefore
+    // re-sends the bytes it owns as a data: URI; the record keeps the symbolic
+    // reference so a retry re-resolves instead of freezing megabytes of base64.
+    const sent: GenerationRequest[] = []
+    const client = fakeClient({
+      generateImage: async (request) => {
+        sent.push(request)
+        return { bytes: PNG, mediaType: 'image/png' }
+      },
+    })
+    const runtime = await runtimeWith(client)
+    const source = await runtime.generate(defaultRequest('image', 'a red apple'))
+    const stored = await runtime.generate(continueRequest(source.id))
+
+    expect(sent).toHaveLength(2)
+    const wire = sent[1]
+    expect(wire?.kind).toBe('image')
+    if (wire?.kind !== 'image') throw new Error('expected an image request')
+    expect(wire.references).toEqual([{ kind: 'image', url: expect.stringMatching(/^data:image\/png;base64,/) }])
+    expect(stored.request).toEqual(continueRequest(source.id))
+    expect(stored.derivedFrom).toBe(source.id)
+  })
+
+  it('refuses a source record that no longer exists before starting a job', async () => {
+    // A background job reports only through a stored record, so a dangling
+    // reference must be refused by the call itself and leave no placeholder.
+    const runtime = await runtimeWith(fakeClient())
+    await expect(runtime.start(continueRequest(newGenerationId()))).rejects.toMatchObject({ code: 'invalid-reference' })
+    expect((await runtime.state()).running).toEqual([])
+  })
+
+  it('refuses a source record that never produced a picture', async () => {
+    const store = await openStore(dataDir, 10)
+    const failed = await store.append(
+      record({ status: 'failed', errorCode: 'upstream-failed', error: '上游失败', retryable: true }),
+      new Uint8Array(0),
+      'application/octet-stream',
+    )
+    const runtime = await runtimeWith(fakeClient())
+    await expect(runtime.start(continueRequest(failed.id))).rejects.toMatchObject({
+      code: 'invalid-reference',
+      message: expect.stringContaining('没有生成成功'),
+    })
+  })
+
+  it('refuses a stored reference on a video request, which needs a public address', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    const source = await runtime.generate(defaultRequest('image', 'a red apple'))
+    const video: VideoRequest = {
+      kind: 'video',
+      prompt: 'animate it',
+      model: 'agnes-video-2.5',
+      mode: 'reference',
+      size: '720P',
+      ratio: '16:9',
+      seconds: 5,
+      references: [{ kind: 'image', generationId: source.id }],
+    }
+    await expect(runtime.start(video)).rejects.toMatchObject({ code: 'invalid-reference' })
+  })
+
+  it('re-resolves the symbolic reference on retry', async () => {
+    const sent: GenerationRequest[] = []
+    const client = fakeClient({
+      generateImage: async (request) => {
+        sent.push(request)
+        return { bytes: PNG, mediaType: 'image/png' }
+      },
+    })
+    const runtime = await runtimeWith(client)
+    const source = await runtime.generate(defaultRequest('image', 'a red apple'))
+    const stored = await runtime.generate(continueRequest(source.id))
+
+    const retried = await runtime.generate(stored.request as ImageRequest, { retryOf: stored.id })
+    expect(sent).toHaveLength(3)
+    const wire = sent[2]
+    if (wire?.kind !== 'image') throw new Error('expected an image request')
+    expect(wire.references[0]?.url).toMatch(/^data:image\/png;base64,/)
+    // A retry settles into the SAME record: one row, one lineage.
+    expect(retried.id).toBe(stored.id)
+    expect(retried.derivedFrom).toBe(source.id)
+  })
+})
+
 describe('routes', () => {
   /** Send one RPC envelope through the execute route. */
   async function rpc(runtime: Awaited<ReturnType<typeof runtimeWith>>, payload: unknown): Promise<{ status: number; body: unknown }> {
@@ -576,6 +683,16 @@ describe('routes', () => {
     const parsed = body as { result: { ok: boolean; error: { code: string } } }
     expect(parsed.result.ok).toBe(false)
     expect(parsed.result.error.code).toBe('agnes-studio/not-configured')
+  })
+
+  it('accepts a stored-generation reference at the fence', async () => {
+    // The wire schema must accept the symbolic form, otherwise "continue
+    // editing" would fail as a bad-request before the Host ever saw it.
+    const runtime = await runtimeWith(fakeClient())
+    const { body } = await rpc(runtime, { action: 'start', request: continueRequest(newGenerationId()) })
+    const parsed = body as { result: { ok: boolean; error: { code: string } } }
+    expect(parsed.result.ok).toBe(false)
+    expect(parsed.result.error.code).toBe('agnes-studio/invalid-reference')
   })
 
   it('serves stored media over the media route with no-store-safe headers', async () => {

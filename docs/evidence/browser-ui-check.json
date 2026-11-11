@@ -1,5 +1,5 @@
 {
-  "at": "2026-11-11T16:30:47.399Z",
+  "at": "2026-11-11T17:07:37.903Z",
   "dsh": "unknown",
   "checks": [
     "browser-app-boot",
@@ -34,6 +34,9 @@
     "display-detail-image: docs/DETAIL*.md + docs/preview*.svg present in the packed tarball",
     "browser-retry-in-place: 1 card retrying, 0 pending, 3 cards, no banner",
     "browser-retry-settles-in-place: 3 images, 3 cards",
+    "browser-continue-editing-prefills: source thumbnail, prompt and card count preserved",
+    "browser-continue-editing-settles: 4 cards, lineage on the new card",
+    "browser-continue-editing-lineage: derivedFrom + symbolic reference kept in the store",
     "browser-console-clean"
   ]
 }

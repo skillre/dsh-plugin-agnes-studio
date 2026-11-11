@@ -19,13 +19,15 @@
  */
 
 import { asStudioError, notConfigured, StudioError } from './errors.js'
-import { createClient, validateRequest, type AgnesClient, type ClientDeps } from './agnes.js'
+import { createClient, dataUriFor, validateRequest, type AgnesClient, type ClientDeps } from './agnes.js'
 import { newGenerationId, type StudioStore } from './store.js'
 import {
   defaultModelFor,
+  isStoredReference,
   type Generation,
   type GenerationRequest,
   type MediaKind,
+  type MediaReference,
   type RunningJob,
   type StudioState,
   type KeySource,
@@ -203,7 +205,14 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
   const begin = async (
     request: GenerationRequest,
     options: GenerateOptions,
-  ): Promise<{ job: RunningJob; controller: AbortController; id: string; createdAt: string; attemptStartedAt: number }> => {
+  ): Promise<{
+    job: RunningJob
+    controller: AbortController
+    id: string
+    createdAt: string
+    attemptStartedAt: number
+    resolved: GenerationRequest
+  }> => {
     const key = await deps.resolveKey().catch(() => {
       throw notConfigured()
     })
@@ -215,6 +224,10 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     // the immediate refusal the caller can act on. The key check runs first so an
     // unconfigured profile still reports "no key" rather than a parameter detail.
     validateRequest(request)
+    // Resolve stored references BEFORE a job exists, so an editor pointing at a
+    // record that has since been deleted refuses immediately instead of becoming
+    // a failed card the user cannot explain.
+    const resolved = await resolveReferences(request)
 
     const id = options.retryOf ?? newGenerationId()
     const createdAt =
@@ -234,16 +247,69 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     // `createdAt` is the record's identity (a retry keeps the original); the
     // attempt start is separate so `durationMs` measures THIS try, not the whole
     // history of a record the user has retried several times.
-    return { job, controller, id, createdAt, attemptStartedAt: Date.now() }
+    return { job, controller, id, createdAt, attemptStartedAt: Date.now(), resolved }
   }
 
-  /** Run one generation to a settled record and store it. */
-  const runGeneration = async (
-    request: GenerationRequest,
-    id: string,
-    createdAt: string,
-    attemptStartedAt: number,
-    controller: AbortController,
+  /**
+   * Inline every stored-generation reference as a `data:` URI.
+   *
+   * The panel can only address generated media through the authenticated
+   * same-origin route, which the upstream cannot reach; the bytes are already on
+   * the Host, so the one request form that works is a `data:` URI. The record's
+   * own `request` keeps the symbolic form, so a retry re-resolves against
+   * whatever still exists instead of freezing a multi-megabyte string into the
+   * index.
+   */
+  const resolveReferences = async (request: GenerationRequest): Promise<GenerationRequest> => {
+    if (!request.references.some(isStoredReference)) return request
+    if (request.kind !== 'image') {
+      throw new StudioError('invalid-reference', '只有生图可以用已保存的记录作为参考素材。')
+    }
+    const generations = await deps.store.list()
+    const resolved: MediaReference[] = []
+    for (const reference of request.references) {
+      if (!isStoredReference(reference)) {
+        resolved.push(reference)
+        continue
+      }
+      const id = reference.generationId ?? ''
+      const source = generations.find((entry) => entry.id === id)
+      if (source === undefined) {
+        throw new StudioError('invalid-reference', '找不到这条生成记录，无法作为参考图。', { generationId: id })
+      }
+      if (source.kind !== 'image') {
+        throw new StudioError('invalid-reference', '只有图片记录可以作为参考素材。', { generationId: id })
+      }
+      if (source.asset === undefined) {
+        throw new StudioError('invalid-reference', '这条记录没有生成成功的图片，无法作为参考图。', { generationId: id })
+      }
+      const media = await deps.store.readMedia(id)
+      if (media === undefined) {
+        throw new StudioError('invalid-reference', '这条记录的图片文件已不存在，无法作为参考图。', { generationId: id })
+      }
+      resolved.push({ kind: 'image', url: dataUriFor(media.mediaType, media.bytes) })
+    }
+    return { ...request, references: resolved }
+  }
+
+  /** The record a new generation continues, when its request names one. */
+  function derivedFromOf(request: GenerationRequest): string | undefined {
+    for (const reference of request.references) {
+      if (isStoredReference(reference)) return reference.generationId
+    }
+    return undefined
+  }
+
+  /** One attempt's immutable inputs, grouped so the long call cannot drift. */
+  interface Attempt {
+    /** The request as recorded: stored references stay symbolic. */
+    readonly request: GenerationRequest
+    /** The request as sent: every stored reference inlined as a data: URI. */
+    readonly resolved: GenerationRequest
+    readonly id: string
+    readonly createdAt: string
+    readonly attemptStartedAt: number
+    readonly controller: AbortController
     /**
      * Keep a non-retryable failure in the history.
      *
@@ -252,9 +318,13 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
      * not keep describing an older attempt). False for a tool call, which throws
      * to its caller and would otherwise sprinkle validation noise into the gallery.
      */
-    keepAnyFailure: boolean,
-  ): Promise<Generation> => {
-    const started = attemptStartedAt
+    readonly keepAnyFailure: boolean
+  }
+
+  /** Run one generation to a settled record and store it. */
+  const runGeneration = async (attempt: Attempt): Promise<Generation> => {
+    const { request, resolved, id, createdAt, attemptStartedAt: started, controller, keepAnyFailure } = attempt
+    const derivedFrom = derivedFromOf(request)
     const base = {
       id,
       kind: request.kind,
@@ -265,13 +335,14 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
       // Stored verbatim so a later retry resends exactly what this record asked
       // for: `params` is a flattened display summary and loses reference URLs.
       request,
+      ...(derivedFrom === undefined ? {} : { derivedFrom }),
     }
     let outcome: { bytes: Uint8Array; mediaType: string; upstreamId?: string }
     try {
       outcome =
-        request.kind === 'image'
-          ? await client.generateImage(request, { signal: controller.signal })
-          : await client.generateVideo(request, { signal: controller.signal })
+        resolved.kind === 'image'
+          ? await client.generateImage(resolved, { signal: controller.signal })
+          : await client.generateVideo(resolved, { signal: controller.signal })
     } catch (error) {
       // The job's OWN controller aborting means the user (or the plugin shutting
       // down) cancelled this work, whatever error shape the client surfaced. That
@@ -334,11 +405,19 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     async generate(request, options = {}) {
       // The tool path: register the job so the panel shows it, then await the
       // outcome and let the throw reach the caller.
-      const { id, createdAt, attemptStartedAt, controller } = await begin(request, options)
+      const { id, createdAt, attemptStartedAt, controller, resolved } = await begin(request, options)
       try {
         // A tool call reports through its throw; only a retry replaces an
         // existing row and so must persist whatever the new outcome is.
-        return await runGeneration(request, id, createdAt, attemptStartedAt, controller, options.retryOf !== undefined)
+        return await runGeneration({
+          request,
+          resolved,
+          id,
+          createdAt,
+          attemptStartedAt,
+          controller,
+          keepAnyFailure: options.retryOf !== undefined,
+        })
       } finally {
         unregisterJob(id)
       }
@@ -353,9 +432,9 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
      * failure — which is what makes leaving the studio and coming back safe.
      */
     async start(request, options = {}) {
-      const { job, id, createdAt, attemptStartedAt, controller } = await begin(request, options)
+      const { job, id, createdAt, attemptStartedAt, controller, resolved } = await begin(request, options)
       // A background job's record IS its report, so every failure is kept.
-      void runGeneration(request, id, createdAt, attemptStartedAt, controller, true)
+      void runGeneration({ request, resolved, id, createdAt, attemptStartedAt, controller, keepAnyFailure: true })
         .catch(() => undefined)
         .finally(() => unregisterJob(id))
       return job

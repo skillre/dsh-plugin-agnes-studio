@@ -43,12 +43,25 @@ const envelopeSchema = z.object({
   payload: z.unknown(),
 })
 
-const referenceSchema = z
-  .object({
-    url: z.string().min(1).max(2_000_000),
-    kind: z.enum(['image', 'video', 'audio']),
-  })
-  .strict()
+/**
+ * One reference: a fetchable URL/data: URI, or a stored generation the Host
+ * resolves. The two forms are separate members instead of optional fields so a
+ * payload with both (or neither) is refused at the fence, not at the API.
+ */
+const referenceSchema = z.union([
+  z
+    .object({
+      url: z.string().min(1).max(2_000_000),
+      kind: z.enum(['image', 'video', 'audio']),
+    })
+    .strict(),
+  z
+    .object({
+      generationId: z.string().min(1).max(128),
+      kind: z.enum(['image', 'video', 'audio']),
+    })
+    .strict(),
+])
 
 const imageRequestSchema = z
   .object({

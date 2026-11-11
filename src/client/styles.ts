@@ -726,6 +726,37 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   100% { transform: translateX(370%); }
 }
 
+.agnes__refine {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid var(--a-accent-line);
+  border-radius: var(--a-radius);
+  background: var(--a-accent-soft);
+}
+.agnes__refineThumb {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: var(--a-radius-sm);
+  border: 1px solid var(--a-border);
+  background: var(--a-surface-2);
+  object-fit: cover;
+}
+.agnes__refineIcon {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--a-accent);
+}
+.agnes__refineText { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.agnes__refineTitle { font-size: 12px; font-weight: 600; color: var(--a-fg); }
+.agnes__refineBody { font-size: 10.5px; line-height: 1.45; color: var(--a-fg-2); }
+.agnes__refine .agnes__button { height: 24px; padding: 0 9px; font-size: 11px; }
+
 .agnes__spinner {
   width: 12px;
   height: 12px;
@@ -868,6 +899,10 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
 /* A record retried from its own card: the accent border marks the row the user
    restarted, so the card reads as "working" rather than "failed". */
 .agnes__card--retrying { border-color: color-mix(in srgb, var(--a-accent) 45%, transparent); }
+.agnes__card--refining {
+  border-color: color-mix(in srgb, var(--a-accent) 48%, transparent);
+  box-shadow: 0 0 0 2px var(--a-accent-soft);
+}
 
 /* A uniform 4:3 frame with "cover": a ragged grid of natural aspect ratios
    leaves holes under every short card and reads as a layout bug. The crop is a
@@ -1001,11 +1036,21 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
 
 .agnes__cardActions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 1px;
   margin-top: 1px;
   padding-top: 6px;
   border-top: 1px solid var(--a-border);
+}
+/* Four actions share a narrow card: let each label stay on one line and let the
+   row wrap as a whole rather than squeezing a label into two characters per row. */
+.agnes__cardActions .agnes__open {
+  flex: none;
+  padding: 0 6px;
+  gap: 4px;
+  font-size: 10.5px;
+  white-space: nowrap;
 }
 .agnes__open {
   appearance: none;

@@ -204,12 +204,32 @@ export const LIMITS = {
   maxMediaBytes: 64 * 1024 * 1024,
 } as const
 
-/** One reference image/video/audio the user attached. */
+/** What a reference is; drives which request field it lands in. */
+export type MediaReferenceKind = 'image' | 'video' | 'audio'
+
+/**
+ * One reference image/video/audio the user attached.
+ *
+ * Exactly one locator is set. `url` names a public HTTPS address or a `data:`
+ * URI the upstream can read itself; `generationId` names an artifact this plugin
+ * already stored, which the Host inlines as a `data:` URI when the request is
+ * sent. The second form is what makes "continue editing" possible: the panel
+ * only knows the authenticated same-origin media route, and the upstream cannot
+ * reach a loopback address, so re-sending a generated picture as a reference has
+ * to happen on the Host, from the bytes it already owns.
+ */
 export interface MediaReference {
-  /** Public URL or `data:` URI the API can read. */
-  readonly url: string
+  /** Public URL or `data:` URI; absent when `generationId` names a stored artifact. */
+  readonly url?: string
   /** What the reference is; drives which request field it lands in. */
-  readonly kind: 'image' | 'video' | 'audio'
+  readonly kind: MediaReferenceKind
+  /** Stored generation whose artifact becomes the reference. */
+  readonly generationId?: string
+}
+
+/** Whether a reference points at a stored generation instead of a URL. */
+export function isStoredReference(reference: MediaReference): boolean {
+  return reference.generationId !== undefined
 }
 
 /** An image-generation request as the dashboard and the tool both express it. */
@@ -306,6 +326,15 @@ export interface Generation {
   readonly retryable?: boolean
   /** Upstream task id for video generations, useful when reporting a bug. */
   readonly upstreamId?: string
+  /**
+   * The record this generation was produced FROM, when it continues an earlier
+   * result ("继续编辑" seeds the next request with this record's picture).
+   *
+   * The reference list in `request` already carries the provenance in machine
+   * form; this field exists so the gallery can show the lineage without having
+   * to inspect and resolve every reference.
+   */
+  readonly derivedFrom?: string
   /**
    * The exact request that produced this record.
    *

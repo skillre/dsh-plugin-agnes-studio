@@ -12,6 +12,7 @@ import {
   buildImageBody,
   buildVideoBody,
   createClient,
+  dataUriFor,
   decodeBase64,
   originOf,
   parseCreateResponse,
@@ -221,6 +222,42 @@ describe('private-address and origin guards', () => {
     ).toBe('agnes-image-2.5-flash')
   })
 
+  it('accepts a stored image as a reference without a URL', () => {
+    // "Continue editing" seeds the next request with an artifact this plugin
+    // already owns. The Host resolves it to a data: URI from the stored bytes,
+    // because the upstream cannot reach the authenticated local media route.
+    expect(
+      validateRequest(
+        imageRequest({ references: [{ kind: 'image', generationId: '11111111-1111-4111-8111-111111111111' }] }),
+      ).id,
+    ).toBe('agnes-image-2.5-flash')
+  })
+
+  it('refuses a reference with two locators or with none', () => {
+    // A payload carrying both would let one silently win; carrying neither
+    // reaches the API as an empty image, which the provider answers with a 400.
+    expectCode(
+      () =>
+        validateRequest(
+          imageRequest({
+            references: [{ url: 'https://cdn.example.com/a.png', kind: 'image', generationId: '11111111-1111-4111-8111-111111111111' }],
+          }),
+        ),
+      'invalid-reference',
+    )
+    expectCode(() => validateRequest(imageRequest({ references: [{ kind: 'image' }] })), 'invalid-reference')
+  })
+
+  it('refuses a stored reference for audio or video, which needs a public address', () => {
+    expectCode(
+      () =>
+        validateRequest(
+          videoRequest({ mode: 'reference', references: [{ kind: 'video', generationId: '11111111-1111-4111-8111-111111111111' }] }),
+        ),
+      'invalid-reference',
+    )
+  })
+
   it('refuses a reference URL carrying userinfo', () => {
     // userinfo is how a hostile URL impersonates a trusted host.
     expectCode(
@@ -251,6 +288,20 @@ describe('request bodies', () => {
     })
     // The documented contract forbids a top-level response_format.
     expect('response_format' in body).toBe(false)
+  })
+
+  it('refuses to send an unresolved stored reference instead of an empty image', () => {
+    // The runtime inlines stored references BEFORE the client is called; a value
+    // that reaches the body builder still symbolic would be sent as a missing
+    // image, so it is a programming error worth an explicit refusal.
+    expectCode(
+      () => buildImageBody(imageRequest({ references: [{ kind: 'image', generationId: '11111111-1111-4111-8111-111111111111' }] })),
+      'invalid-reference',
+    )
+  })
+
+  it('builds the data: URI a stored image is inlined as', () => {
+    expect(dataUriFor('image/png', new Uint8Array([0x01, 0x02]))).toBe('data:image/png;base64,AQI=')
   })
 
   it('sends seconds as a string and omits media for text mode', () => {

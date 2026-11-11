@@ -16,7 +16,7 @@
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { appendFailedGeneration } from './seed-fixture.mjs'
+import { appendFailedGeneration, FIXTURE_ID } from './seed-fixture.mjs'
 
 const port = process.env.CDP_PORT || '9333'
 const evidenceDir = process.env.EVIDENCE_DIR || 'docs/evidence'
@@ -1067,7 +1067,7 @@ try {
       `(() => {
         const card = document.querySelector('.agnes__card--failed');
         if (!card) return null;
-        const retry = [...card.querySelectorAll('button')].find((node) => node.textContent.includes('重试'));
+        const retry = [...card.querySelectorAll('button')].find((node) => node.textContent.trim() === '重试');
         if (!retry) return null;
         return JSON.stringify({ text: card.querySelector('.agnes__promptText')?.textContent.trim() ?? '' });
       })()`,
@@ -1083,7 +1083,7 @@ try {
     const clicked = await cdp.evaluate(
       `(() => {
         const card = document.querySelector('.agnes__card--failed');
-        const retry = card ? [...card.querySelectorAll('button')].find((node) => node.textContent.includes('重试')) : null;
+        const retry = card ? [...card.querySelectorAll('button')].find((node) => node.textContent.trim() === '重试') : null;
         if (!retry) return 'no retry button';
         retry.click();
         return 'clicked';
@@ -1150,6 +1150,110 @@ try {
       'browser-retry-settles-in-place',
       settledState.failed > 0 ? 'settled back to the failed card, 3 cards' : `${String(settledState.images)} images, 3 cards`,
     )
+  }
+
+  // 20. "继续编辑": a finished picture becomes the next request's reference.
+  //
+  //     The panel only knows the authenticated same-origin media route, so the
+  //     upstream cannot fetch the source itself: the Host must inline the stored
+  //     bytes as a data: URI. This check therefore exercises the whole chain
+  //     against the real API — click 继续编辑 on a seeded picture, submit, and
+  //     then read the store to prove the new record kept the symbolic reference
+  //     and its lineage instead of freezing base64 into the index.
+  if (apiKey === undefined || apiKey === '') {
+    process.stdout.write('  skip browser-continue-editing (no AGNES_API_KEY: the Host cannot start the follow-up)\n')
+  } else {
+    const continueState = JSON.parse(await readFile(join(process.cwd(), '.preview-state.json'), 'utf8'))
+    const cardsBefore = await cdp.evaluate(`document.querySelectorAll('.agnes__card').length`)
+    const clickedContinue = await cdp.evaluate(
+      `(() => {
+        const card = [...document.querySelectorAll('.agnes__card')].find((node) =>
+          (node.querySelector('.agnes__promptText')?.textContent ?? '').includes('灯箱验收用图：网格 + 圆环'));
+        const button = card ? [...card.querySelectorAll('button')].find((node) => node.textContent.includes('继续编辑')) : null;
+        if (!button) return 'no continue button';
+        button.click();
+        return 'clicked';
+      })()`,
+    )
+    if (clickedContinue !== 'clicked') throw new Error(`could not start continue editing: ${String(clickedContinue)}`)
+
+    const editor = await until(
+      cdp.evaluate,
+      `(() => {
+        const banner = document.querySelector('.agnes__refine');
+        const prompt = document.querySelector('textarea.agnes__prompt');
+        const thumb = document.querySelector('img.agnes__refineThumb');
+        const submit = [...document.querySelectorAll('.agnes__composerFoot button')].map((node) => node.textContent.trim()).join('|');
+        if (!banner || !prompt || !thumb) return null;
+        return JSON.stringify({
+          title: banner.querySelector('.agnes__refineTitle')?.textContent.trim() ?? '',
+          prompt: prompt.value,
+          thumb: thumb.getAttribute('src'),
+          refining: document.querySelectorAll('.agnes__card--refining').length,
+          cards: document.querySelectorAll('.agnes__card').length,
+          submit,
+        });
+      })()`,
+      'the composer to load the finished picture',
+    )
+    const editorState = JSON.parse(editor)
+    if (!editorState.title.includes('接着这条')) throw new Error(`unexpected editor title: ${editorState.title}`)
+    if (!editorState.prompt.includes('灯箱验收用图：网格 + 圆环')) throw new Error('the prompt was not restored')
+    if (!String(editorState.thumb).includes(encodeURIComponent(FIXTURE_ID))) throw new Error('the source thumbnail is not the fixture')
+    if (editorState.refining !== 1) throw new Error('the source card is not marked as being edited')
+    if (editorState.cards !== cardsBefore) throw new Error('opening the editor must not add a card')
+    if (!editorState.submit.includes('生成修改版')) throw new Error('the submit button does not say it will generate an edit')
+    await cdp.shot('08-continue-editing.png')
+    check('browser-continue-editing-prefills', 'source thumbnail, prompt and card count preserved')
+
+    const submittedEdit = await cdp.evaluate(
+      `(() => {
+        const button = [...document.querySelectorAll('.agnes__composerFoot button')].find((node) => node.textContent.includes('生成修改版'));
+        if (!button) return 'no submit';
+        button.click();
+        return 'clicked';
+      })()`,
+    )
+    if (submittedEdit !== 'clicked') throw new Error(`could not submit the edit: ${String(submittedEdit)}`)
+
+    const settledEdit = await until(
+      cdp.evaluate,
+      `(() => {
+        if (document.querySelector('.agnes__card--pending')) return null;
+        if (document.querySelector('.agnes__card--retrying')) return null;
+        if (document.querySelector('.agnes__busy')) return null;
+        if (document.querySelector('.agnes__refine')) return null;
+        const cards = [...document.querySelectorAll('.agnes__card')];
+        if (cards.length !== ${String(cardsBefore + 1)}) return null;
+        const first = cards[0];
+        return JSON.stringify({
+          cards: cards.length,
+          facts: [...first.querySelectorAll('.agnes__fact')].map((node) => node.textContent.trim()),
+          hasImage: first.querySelector('img.agnes__thumb') !== null,
+          failed: first.classList.contains('agnes__card--failed'),
+        });
+      })()`,
+      'the edited picture to finish',
+      180_000,
+    )
+    const settleState = JSON.parse(settledEdit)
+    if (settleState.failed) throw new Error('the edited generation failed')
+    if (!settleState.hasImage) throw new Error('the edited generation has no picture')
+    if (!settleState.facts.some((fact) => fact.includes('承接'))) {
+      throw new Error(`the new card does not show its lineage: ${JSON.stringify(settleState.facts)}`)
+    }
+    await cdp.shot('09-continue-settled.png')
+    check('browser-continue-editing-settles', `${String(settleState.cards)} cards, lineage on the new card`)
+
+    // The store keeps the SYMBOLIC reference; the data URI is built per attempt.
+    const storedIndex = JSON.parse(await readFile(join(continueState.dataDir, 'index.json'), 'utf8'))
+    const newest = storedIndex.generations[0]
+    const storedRefs = newest?.request?.references ?? []
+    if (newest?.derivedFrom !== FIXTURE_ID) {
+      throw new Error(`the new record does not remember its source: ${String(newest?.derivedFrom)}`)
+    }
+    if (storedRefs[0]?.generationId !== FIXTURE_ID) throw new Error('the stored request lost the symbolic reference')
+    check('browser-continue-editing-lineage', 'derivedFrom + symbolic reference kept in the store')
   }
 
   await drainConsole()

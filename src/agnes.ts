@@ -33,6 +33,7 @@ import {
   type ImageSize,
   type MediaKind,
   type MediaReference,
+  type MediaReferenceKind,
   type ModelSpec,
   type VideoMode,
   type VideoRatio,
@@ -40,6 +41,7 @@ import {
   type VideoSeconds,
   type VideoSize,
 } from './types.js'
+import { isStoredReference } from './types.js'
 import { StudioError, fromUpstreamStatus } from './errors.js'
 
 /** Injected HTTP callable, so tests can substitute a fake transport. */
@@ -245,21 +247,24 @@ function isPrivateIpv6(host: string): boolean {
 }
 
 /**
- * Require a reference the Agnes service can actually fetch.
+ * Require a reference URL the Agnes service can actually fetch.
  *
  * The upstream fetches references itself, so a loopback, private-network or
  * plain-HTTP URL is unusable: it would fail late, after queueing and possibly
  * after billing. Refusing it here keeps the failure immediate and explainable,
  * and keeps this plugin from being a channel that feeds internal addresses to a
- * third party.
+ * third party. A reference that names a stored generation instead of a URL is
+ * skipped: the runtime resolves it to a `data:` URI from bytes it already owns.
  */
 export function assertPublicReference(reference: MediaReference): void {
-  if (/^data:/i.test(reference.url)) return
+  const url = reference.url
+  if (url === undefined) return
+  if (/^data:/i.test(url)) return
   let parsed: URL
   try {
-    parsed = new URL(reference.url)
+    parsed = new URL(url)
   } catch {
-    throw new StudioError('invalid-reference', `参考素材地址无法解析：${reference.url.slice(0, 120)}`)
+    throw new StudioError('invalid-reference', `参考素材地址无法解析：${url.slice(0, 120)}`)
   }
   if (parsed.protocol !== 'https:') {
     throw new StudioError('invalid-reference', '参考素材必须是公网 HTTPS 地址或 data: URI。')
@@ -276,6 +281,27 @@ export function assertPublicReference(reference: MediaReference): void {
   if (isPrivateIpv4(host) || isPrivateIpv6(host)) {
     throw new StudioError('invalid-reference', '参考素材必须是公网可访问地址，不能是 localhost 或内网地址。')
   }
+}
+
+/**
+ * Require exactly one usable locator on a reference before any request is sent.
+ *
+ * `url` and `generationId` are alternatives, not a pair: sending both would let
+ * one silently win, and sending neither would reach the API as an empty image.
+ * A stored reference is only legal for images, because the Host inlines image
+ * bytes as a `data:` URI and has no public address to give the upstream for an
+ * audio or video file.
+ */
+export function assertReferenceLocator(reference: MediaReference): void {
+  const hasUrl = typeof reference.url === 'string' && reference.url !== ''
+  const hasStored = isStoredReference(reference) && typeof reference.generationId === 'string' && reference.generationId !== ''
+  if (hasUrl === hasStored) {
+    throw new StudioError('invalid-reference', '参考素材必须且只能指定一个地址或一条已保存的生成记录。')
+  }
+  if (hasStored && reference.kind !== 'image') {
+    throw new StudioError('invalid-reference', '只有已保存的图片可以作为参考素材，音频与视频请用公网地址。')
+  }
+  assertPublicReference(reference)
 }
 
 /** Validate one request against the model table before any network call. */
@@ -299,7 +325,7 @@ export function validateRequest(request: GenerationRequest): ModelSpec {
     if (request.references.length > images.length) {
       throw new StudioError('invalid-reference', '生图只接受图片作为参考，不接受音频或视频。')
     }
-    for (const reference of request.references) assertPublicReference(reference)
+    for (const reference of request.references) assertReferenceLocator(reference)
     return model
   }
   if (!model.modes.includes(request.mode)) {
@@ -322,7 +348,7 @@ export function validateRequest(request: GenerationRequest): ModelSpec {
     throw new StudioError('invalid-reference', `参考素材最多 ${LIMITS.references} 个。`)
   }
   for (const reference of request.references) {
-    assertPublicReference(reference)
+    assertReferenceLocator(reference)
   }
   // Mode rules: each mode accepts a disjoint media set, and the API answers 400
   // when a disallowed field is present — so the check has to be this strict.
@@ -364,9 +390,32 @@ export function validateRequest(request: GenerationRequest): ModelSpec {
   return model
 }
 
+/** Build the `data:` URI a stored artifact is inlined as. */
+export function dataUriFor(mediaType: string, bytes: Uint8Array): string {
+  return `data:${mediaType};base64,${Buffer.from(bytes).toString('base64')}`
+}
+
+/**
+ * Collect the URLs of one reference kind.
+ *
+ * A stored reference is resolved by the runtime into a `data:` URI BEFORE the
+ * client is called; seeing one here means the request would go out with an
+ * empty image, so it is refused with a precise message instead.
+ */
+function referenceUrls(references: readonly MediaReference[], kind: MediaReferenceKind): string[] {
+  return references
+    .filter((reference) => reference.kind === kind)
+    .map((reference) => {
+      if (typeof reference.url !== 'string' || reference.url === '') {
+        throw new StudioError('invalid-reference', '参考素材还没有被解析成地址，无法发送请求。')
+      }
+      return reference.url
+    })
+}
+
 /** Build the JSON body for an image request. */
 export function buildImageBody(request: ImageRequest): Record<string, unknown> {
-  const images = request.references.filter((reference) => reference.kind === 'image').map((reference) => reference.url)
+  const images = referenceUrls(request.references, 'image')
   const extra: Record<string, unknown> = { response_format: 'url' }
   // Image-to-image passes references inside `extra_body`; the top-level `image`
   // field is accepted by some gateways but the documented contract is nested.
@@ -386,9 +435,9 @@ export function buildVideoBody(request: VideoRequest): Record<string, unknown> {
     n: 1,
   }
   if (request.seed !== undefined) body['seed'] = request.seed
-  const images = request.references.filter((reference) => reference.kind === 'image').map((reference) => reference.url)
-  const audios = request.references.filter((reference) => reference.kind === 'audio').map((reference) => reference.url)
-  const videos = request.references.filter((reference) => reference.kind === 'video').map((reference) => reference.url)
+  const images = referenceUrls(request.references, 'image')
+  const audios = referenceUrls(request.references, 'audio')
+  const videos = referenceUrls(request.references, 'video')
   if (request.mode === 'keyframe') {
     // Read the named slots directly: positional destructuring of a filtered array
     // sent a lone last frame as `first_frame`.

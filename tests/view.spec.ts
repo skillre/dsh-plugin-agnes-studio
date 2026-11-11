@@ -677,6 +677,168 @@ describe('image viewer', () => {
   })
 })
 
+describe('continue editing', () => {
+  /** A finished picture with its exact request, as the Host stores it. */
+  function finishedImage(): Generation {
+    return {
+      id: 'aaaa1111-1111-4111-8111-111111111111',
+      kind: 'image',
+      status: 'succeeded',
+      model: 'agnes-image-2.5-flash',
+      prompt: 'a red apple on a white table',
+      params: { size: '2K', ratio: '4:3', references: 1, imageReferences: 1 },
+      createdAt: '2026-11-11T00:00:00.000Z',
+      durationMs: 21_000,
+      asset: { src: '/api/agnes-studio/media/aaaa1111-1111-4111-8111-111111111111', mediaType: 'image/png', bytes: 900 },
+      request: {
+        kind: 'image',
+        prompt: 'a red apple on a white table',
+        model: 'agnes-image-2.5-flash',
+        size: '2K',
+        ratio: '4:3',
+        references: [{ url: 'https://cdn.example.com/plate.png', kind: 'image' }],
+      },
+    }
+  }
+
+  it('loads a finished picture back into the composer and seeds the next request with it', async () => {
+    const source = finishedImage()
+    const { generated } = renderPanel({ generations: [source] })
+    await screen.findByText(source.prompt)
+
+    fireEvent.click(screen.getByRole('button', { name: translate('gallery.continueEditing') }))
+
+    // The editor explains itself and the source picture is visible in it.
+    expect(await screen.findByText(translate('refine.title'))).toBeTruthy()
+    const thumb = document.querySelector('img.agnes__refineThumb')
+    expect(thumb?.getAttribute('src')).toBe(source.asset?.src)
+    // The record's own request came back: prompt, model, size and its URL reference.
+    const prompt = screen.getByLabelText(translate('form.prompt')) as HTMLTextAreaElement
+    expect(prompt.value).toBe(source.prompt)
+    const select = document.querySelector('select') as HTMLSelectElement
+    expect(select.value).toBe('agnes-image-2.5-flash')
+    expect((screen.getByLabelText(`${translate('form.references')} 1`) as HTMLInputElement).value).toBe(
+      'https://cdn.example.com/plate.png',
+    )
+    // The source card is highlighted while it is being edited, and it is NOT
+    // replaced — a continuation is a new record.
+    expect(document.querySelector('.agnes__card--refining')).not.toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: translate('form.submitRefine') }))
+    await waitFor(() => expect(generated).toHaveLength(1))
+    // The result being edited goes first, and the record's own reference survives.
+    expect(generated[0]).toMatchObject({
+      kind: 'image',
+      prompt: source.prompt,
+      size: '2K',
+      ratio: '4:3',
+      references: [
+        { kind: 'image', generationId: source.id },
+        { kind: 'image', url: 'https://cdn.example.com/plate.png' },
+      ],
+    })
+    // Accepting the request closes the editor; the new record starts as a job.
+    await waitFor(() => expect(screen.queryByText(translate('refine.title'))).toBeNull())
+  })
+
+  it('brings a failed generation back for adjustment, without a seed', async () => {
+    const failed: Generation = {
+      id: 'fail1111-1111-4111-8111-111111111111',
+      kind: 'image',
+      status: 'failed',
+      model: 'agnes-image-2.1-flash',
+      prompt: 'a blurry cat',
+      params: { size: '1K', ratio: '1:1' },
+      createdAt: '2026-11-11T00:00:00.000Z',
+      errorCode: 'upstream-failed',
+      error: '上游 500',
+      request: { kind: 'image', prompt: 'a blurry cat', model: 'agnes-image-2.1-flash', size: '1K', ratio: '1:1', references: [] },
+    }
+    const { generated } = renderPanel({ generations: [failed] })
+    await screen.findByText('a blurry cat')
+
+    fireEvent.click(screen.getByRole('button', { name: translate('gallery.editFailed') }))
+    expect(await screen.findByText(translate('refine.titleFailed'))).toBeTruthy()
+    expect(document.querySelector('img.agnes__refineThumb')).toBeNull()
+    const prompt = screen.getByLabelText(translate('form.prompt')) as HTMLTextAreaElement
+    expect(prompt.value).toBe('a blurry cat')
+
+    fireEvent.change(prompt, { target: { value: 'a sharp cat' } })
+    fireEvent.click(screen.getByRole('button', { name: translate('form.submitRefineFailed') }))
+    await waitFor(() => expect(generated).toHaveLength(1))
+    expect(generated[0]).toMatchObject({ kind: 'image', prompt: 'a sharp cat', references: [] })
+  })
+
+  it('brings a failed video back on the video tab with its parameters', async () => {
+    const failed: Generation = {
+      id: 'fa11v111-1111-4111-8111-111111111111',
+      kind: 'video',
+      status: 'failed',
+      model: 'agnes-video-2.5-flash',
+      prompt: 'a queue test',
+      params: { mode: 'text', seconds: 7, size: '720P', ratio: '16:9' },
+      createdAt: '2026-11-11T00:00:00.000Z',
+      errorCode: 'queue-full',
+      error: 'Agnes 视频队列已满，请稍后重试。',
+      retryable: true,
+      request: {
+        kind: 'video',
+        prompt: 'a queue test',
+        model: 'agnes-video-2.5-flash',
+        mode: 'text',
+        size: '720P',
+        ratio: '16:9',
+        seconds: 7,
+        references: [],
+      },
+    }
+    const { generated } = renderPanel({ generations: [failed] })
+    await screen.findByText('a queue test')
+
+    fireEvent.click(screen.getByRole('button', { name: translate('gallery.editFailed') }))
+    expect(await screen.findByText(translate('refine.titleFailed'))).toBeTruthy()
+    expect(screen.getByRole('tab', { name: translate('tab.video') }).getAttribute('aria-selected')).toBe('true')
+
+    fireEvent.click(screen.getByRole('button', { name: translate('form.submitRefineFailed') }))
+    await waitFor(() => expect(generated).toHaveLength(1))
+    expect(generated[0]).toMatchObject({ kind: 'video', prompt: 'a queue test', mode: 'text', seconds: 7 })
+  })
+
+  it('does not offer result-based editing for a finished video', async () => {
+    // Agnes' video API has no way to take a stored video back in without a public
+    // URL, so a finished video deliberately offers neither action.
+    const video: Generation = {
+      id: 'vid11v11-1111-4111-8111-111111111111',
+      kind: 'video',
+      status: 'succeeded',
+      model: 'agnes-video-2.5',
+      prompt: 'an apple rotating',
+      params: { seconds: 5 },
+      createdAt: '2026-11-11T00:00:00.000Z',
+      asset: { src: '/api/agnes-studio/media/vid11v11-1111-4111-8111-111111111111', mediaType: 'video/mp4', bytes: 100 },
+    }
+    renderPanel({ generations: [video] })
+    await screen.findByText('an apple rotating')
+    expect(screen.queryByRole('button', { name: translate('gallery.continueEditing') })).toBeNull()
+    expect(screen.queryByRole('button', { name: translate('gallery.editFailed') })).toBeNull()
+  })
+
+  it('abandons the edit without touching the form or the source record', async () => {
+    const source = finishedImage()
+    renderPanel({ generations: [source] })
+    await screen.findByText(source.prompt)
+    fireEvent.click(screen.getByRole('button', { name: translate('gallery.continueEditing') }))
+    await screen.findByText(translate('refine.title'))
+
+    fireEvent.click(screen.getByRole('button', { name: translate('refine.cancel') }))
+    await waitFor(() => expect(screen.queryByText(translate('refine.title'))).toBeNull())
+    expect(document.querySelector('.agnes__card--refining')).toBeNull()
+    // The form is a scratch pad: cancelling leaves the loaded text for reuse.
+    expect((screen.getByLabelText(translate('form.prompt')) as HTMLTextAreaElement).value).toBe(source.prompt)
+    expect(screen.getByRole('button', { name: translate('form.submitImage') })).toBeTruthy()
+  })
+})
+
 describe('dictionaries', () => {
   it('ships both locales with identical key sets', () => {
     const en = dictFor('en')

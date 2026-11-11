@@ -39,6 +39,7 @@ import {
   IMAGE_SIZES,
   LIMITS,
   VIDEO_DIMENSIONS as VIDEO_DIMENSIONS_REF,
+  VIDEO_MODES,
   VIDEO_RATIOS,
   VIDEO_SECONDS,
   modelsFor,
@@ -144,6 +145,74 @@ function initialVideoDraft(): VideoDraft {
     firstFrame: '',
     lastFrame: '',
     references: [],
+  }
+}
+
+/** Read one flattened parameter, when it is a plain string. */
+function paramString(generation: Generation, key: string): string | undefined {
+  const value = generation.params[key]
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/** Pick a value from a fixed option table, falling back for older records. */
+function pickOption<T extends string>(options: readonly T[], value: string | undefined, fallback: T): T {
+  return value !== undefined && (options as readonly string[]).includes(value) ? (value as T) : fallback
+}
+
+/** The reference URLs a stored request still carries in the editable URL form. */
+function referenceUrlsFrom(request: GenerationRequest | undefined): string[] {
+  if (request === undefined) return []
+  const urls: string[] = []
+  for (const reference of request.references) {
+    // A stored-generation reference IS the result being edited; it is shown as
+    // the editor's source chip and never as an editable URL. Copying it into the
+    // text list would turn the artifact link into a string the user cannot open.
+    if (reference.kind === 'image' && typeof reference.url === 'string' && reference.url !== '') urls.push(reference.url)
+  }
+  return urls
+}
+
+/**
+ * Rebuild the image form from a stored result.
+ *
+ * The record's exact request is preferred: `params` is a flattened display
+ * summary, so rebuilding from it would silently drop the reference URLs. A
+ * record written before `request` existed still gets its prompt, model, size
+ * and ratio, which is what the user can reasonably re-adjust.
+ */
+function imageDraftFrom(generation: Generation): ImageDraft {
+  const request = generation.request?.kind === 'image' ? generation.request : undefined
+  const fallback = modelsFor('image')[0]?.id ?? ''
+  return {
+    prompt: request?.prompt ?? generation.prompt,
+    model: request?.model ?? (modelsFor('image').some((spec) => spec.id === generation.model) ? generation.model : fallback),
+    size: request?.size ?? pickOption(IMAGE_SIZES, paramString(generation, 'size'), '1K'),
+    ratio: request?.ratio ?? pickOption(IMAGE_RATIOS, paramString(generation, 'ratio'), '1:1'),
+    references: referenceUrlsFrom(request),
+  }
+}
+
+/** Rebuild the video form from a stored result; same rules as the image form. */
+function videoDraftFrom(generation: Generation): VideoDraft {
+  const request = generation.request?.kind === 'video' ? generation.request : undefined
+  const fallback = modelsFor('video')[0]?.id ?? ''
+  const model = request?.model ?? (modelsFor('video').some((spec) => spec.id === generation.model) ? generation.model : fallback)
+  const spec = modelsFor('video').find((entry) => entry.id === model)
+  const storedSeconds = Number(paramString(generation, 'seconds'))
+  const seconds = request?.seconds ?? (VIDEO_SECONDS.includes(storedSeconds as VideoSeconds) ? (storedSeconds as VideoSeconds) : 5)
+  const storedSeed = generation.params['seed']
+  const seed = request?.seed ?? (typeof storedSeed === 'number' ? storedSeed : undefined)
+  return {
+    prompt: request?.prompt ?? generation.prompt,
+    model,
+    mode: request?.mode ?? pickOption(VIDEO_MODES, paramString(generation, 'mode'), 'text'),
+    size: request?.size ?? pickOption((spec?.sizes ?? ['720P']) as readonly VideoSize[], paramString(generation, 'size'), '720P'),
+    ratio: request?.ratio ?? pickOption(VIDEO_RATIOS, paramString(generation, 'ratio'), '16:9'),
+    seconds,
+    seed: seed === undefined ? '' : String(seed),
+    firstFrame: request?.firstFrame ?? '',
+    lastFrame: request?.lastFrame ?? '',
+    references: referenceUrlsFrom(request),
   }
 }
 
@@ -1161,13 +1230,17 @@ function GenerationCard(props: {
   generation: Generation
   /** Whether the Host is retrying THIS record right now. */
   retrying: boolean
+  /** Whether the composer is currently editing from THIS record. */
+  refining: boolean
   onDelete: (id: string) => void
   onRetry: (generation: Generation) => void
   onCancelJob: () => void
   onOpen: (generation: Generation, opener: Element | null) => void
+  /** Load this record back into the composer (continue editing / edit & retry). */
+  onEdit: (generation: Generation) => void
   disabled: boolean
 }): JSX.Element {
-  const { t, generation, retrying, onDelete, onRetry, onCancelJob, onOpen, disabled } = props
+  const { t, generation, retrying, refining, onDelete, onRetry, onCancelJob, onOpen, onEdit, disabled } = props
   const asset = generation.asset
   const isImage = generation.kind === 'image'
   const failed = generation.status === 'failed'
@@ -1178,6 +1251,7 @@ function GenerationCard(props: {
   // settles, so its old duration is dropped: it would otherwise read as the
   // runtime of the attempt the user is watching.
   const facts = [
+    ...(generation.derivedFrom === undefined ? [] : [t('gallery.derivedFrom', { id: generation.derivedFrom.slice(0, 8) })]),
     dimensions,
     ...(retrying || took === '' ? [] : [t('gallery.took', { seconds: took })]),
     ...paramFacts(generation),
@@ -1186,7 +1260,11 @@ function GenerationCard(props: {
   return (
     <article
       className={
-        retrying ? 'agnes__card agnes__card--retrying' : failed ? 'agnes__card agnes__card--failed' : 'agnes__card'
+        retrying
+          ? 'agnes__card agnes__card--retrying'
+          : failed
+            ? `agnes__card agnes__card--failed${refining ? ' agnes__card--refining' : ''}`
+            : `agnes__card${refining ? ' agnes__card--refining' : ''}`
       }
     >
       {retrying ? (
@@ -1282,6 +1360,23 @@ function GenerationCard(props: {
                   <IconDownload />
                 </a>
               ) : null}
+              {!failed && isImage && asset !== undefined ? (
+                // A finished picture can seed the next request; a finished video
+                // cannot, because the API offers no way to feed a stored video
+                // back in without a public URL.
+                <button type="button" className="agnes__open" disabled={disabled} onClick={() => onEdit(generation)}>
+                  <IconSpark />
+                  {t('gallery.continueEditing')}
+                </button>
+              ) : null}
+              {failed ? (
+                // Any failure can be edited and resubmitted, including the ones
+                // an unchanged retry would only reproduce.
+                <button type="button" className="agnes__open" disabled={disabled} onClick={() => onEdit(generation)}>
+                  <IconSpark />
+                  {t('gallery.editFailed')}
+                </button>
+              ) : null}
               {failed && generation.retryable === true ? (
                 <button type="button" className="agnes__open" disabled={disabled} onClick={() => onRetry(generation)}>
                   <IconReset />
@@ -1323,6 +1418,18 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   const [filter, setFilter] = useState<Filter>('all')
   const [imageDraft, setImageDraft] = useState<ImageDraft>(initialImageDraft)
   const [videoDraft, setVideoDraft] = useState<VideoDraft>(initialVideoDraft)
+  /**
+   * The settled record the composer is currently editing from, if any.
+   *
+   * Not a mode of the gallery: the source record stays exactly where it is. For
+   * a finished picture the next request is seeded with these bytes, and for a
+   * failure only the prompt and parameters come back, because a failed
+   * generation produced no artifact to seed anything with.
+   */
+  const [refineSource, setRefineSource] = useState<Generation | null>(null)
+  /** The finished picture the current edit is based on, when the source has one. */
+  const refineSeed =
+    refineSource !== null && refineSource.kind === 'image' && refineSource.asset !== undefined ? refineSource : undefined
   /**
    * Which generation the viewer shows, by id rather than by object.
    *
@@ -1405,7 +1512,7 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
    * makes the work survive the user leaving the studio.
    */
   const run = useCallback(
-    async (request: GenerationRequest) => {
+    async (request: GenerationRequest, onAccepted?: () => void) => {
       lastRequest.current = request
       setSubmitting(true)
       setError(null)
@@ -1413,6 +1520,7 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
         const next = await api.start(request)
         if (!mounted.current) return
         setState(next)
+        onAccepted?.()
       } catch (cause) {
         if (!mounted.current) return
         const recordId = cause instanceof ActionError ? cause.details['recordId'] : undefined
@@ -1447,6 +1555,23 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
     [api, t],
   )
 
+  /**
+   * Load one settled result back into the composer.
+   *
+   * This is the entry point for BOTH outcomes. A finished picture is seeded into
+   * the next request as its reference image; a failure has no artifact, so only
+   * its prompt and parameters are restored for adjustment. Submitting always
+   * creates a NEW record: the original stays in the gallery as the before half of
+   * the pair, and reusing the record id would make an edit look like a retry.
+   */
+  const beginRefine = useCallback((generation: Generation) => {
+    setError(null)
+    setTab(generation.kind)
+    setRefineSource(generation)
+    if (generation.kind === 'image') setImageDraft(imageDraftFrom(generation))
+    else setVideoDraft(videoDraftFrom(generation))
+  }, [])
+
   /** Cancel one running job. */
   const cancelJob = useCallback(
     async (id: string) => {
@@ -1471,8 +1596,14 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
       .map((url) => url.trim())
       .filter((url) => url !== '')
       .map((url) => ({ url, kind: 'image' as const }))
-    void run({ kind: 'image', prompt, model: imageDraft.model, size: imageDraft.size, ratio: imageDraft.ratio, references })
-  }, [imageDraft, run, t])
+    // The result being edited goes first: the image-to-image contract treats the
+    // input array as "the picture to transform", and this is the one on screen.
+    if (refineSeed !== undefined) references.unshift({ kind: 'image', generationId: refineSeed.id })
+    void run(
+      { kind: 'image', prompt, model: imageDraft.model, size: imageDraft.size, ratio: imageDraft.ratio, references },
+      () => setRefineSource(null),
+    )
+  }, [imageDraft, refineSeed, run, t])
 
   /** Submit the video form. */
   const submitVideo = useCallback(() => {
@@ -1500,23 +1631,28 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
       }
     }
     const seed = videoDraft.seed.trim() === '' ? undefined : Number(videoDraft.seed)
-    void run({
-      kind: 'video',
-      prompt,
-      model: videoDraft.model,
-      mode: videoDraft.mode,
-      size: videoDraft.size,
-      ratio: videoDraft.ratio,
-      seconds: videoDraft.seconds,
-      references,
-      ...(seed === undefined || !Number.isInteger(seed) ? {} : { seed }),
-    })
+    void run(
+      {
+        kind: 'video',
+        prompt,
+        model: videoDraft.model,
+        mode: videoDraft.mode,
+        size: videoDraft.size,
+        ratio: videoDraft.ratio,
+        seconds: videoDraft.seconds,
+        references,
+        ...(seed === undefined || !Number.isInteger(seed) ? {} : { seed }),
+      },
+      () => setRefineSource(null),
+    )
   }, [run, t, videoDraft])
 
   const deleteOne = useCallback(
     async (id: string) => {
       try {
         setState(await api.remove(id))
+        // The editor must not keep pointing at a record that no longer exists.
+        setRefineSource((current) => (current?.id === id ? null : current))
       } catch (cause) {
         setError({ message: messageFor(t, cause), retryable: false })
       }
@@ -1528,6 +1664,7 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
     if (!confirmInBrowser(t('gallery.confirmClear'))) return
     try {
       setState(await api.clear())
+      setRefineSource(null)
     } catch (cause) {
       setError({ message: messageFor(t, cause), retryable: false })
     }
@@ -1771,6 +1908,37 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
             </div>
           ))}
 
+          {/* The editor's source: shown only for the capability tab it belongs
+              to. Switching tabs keeps the edit alive, but the image seed only
+              ever applies to an image submit. */}
+          {refineSource !== null && refineSource.kind === tab ? (
+            <div className="agnes__refine" role="status">
+              {refineSeed !== undefined && refineSeed.asset !== undefined ? (
+                <img className="agnes__refineThumb" src={refineSeed.asset.src} alt="" />
+              ) : (
+                <span className="agnes__refineIcon" aria-hidden="true">
+                  <IconSpark />
+                </span>
+              )}
+              <span className="agnes__refineText">
+                <span className="agnes__refineTitle">
+                  {t(refineSource.status === 'failed' ? 'refine.titleFailed' : 'refine.title')}
+                </span>
+                <span className="agnes__refineBody">
+                  {t(refineSource.status === 'failed' ? 'refine.bodyFailed' : 'refine.body')}
+                </span>
+              </span>
+              <span className="agnes__spacer" />
+              <button
+                type="button"
+                className="agnes__button agnes__button--ghost"
+                onClick={() => setRefineSource(null)}
+              >
+                {t('refine.cancel')}
+              </button>
+            </div>
+          ) : null}
+
           {tab === 'image' ? (
             <div className="agnes__form">
               <PromptBox
@@ -1958,7 +2126,15 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
               onClick={tab === 'image' ? submitImage : submitVideo}
             >
               <IconSpark />
-              {tab === 'image' ? t('form.submitImage') : t('form.submitVideo')}
+              {tab === 'image'
+                ? refineSource !== null && refineSource.kind === 'image'
+                  ? refineSeed !== undefined
+                    ? t('form.submitRefine')
+                    : t('form.submitRefineFailed')
+                  : t('form.submitImage')
+                : refineSource !== null && refineSource.kind === 'video'
+                  ? t('form.submitRefineFailed')
+                  : t('form.submitVideo')}
             </button>
             <span className="agnes__hint">
               {tab === 'image' ? t('hint.imageFast') : t('hint.videoSlow')}
@@ -2032,9 +2208,11 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
                   t={t}
                   generation={generation}
                   retrying={retryingRecordIds.has(generation.id)}
+                  refining={refineSource?.id === generation.id}
                   disabled={disabled}
                   onDelete={(id) => void deleteOne(id)}
                   onRetry={(generation) => void retryRecord(generation)}
+                  onEdit={beginRefine}
                   onCancelJob={() => {
                     // Cancel the JOB, looked up by the record it replaces: the
                     // panel is not the authority on job ids, `retryOf` is the

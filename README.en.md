@@ -29,6 +29,16 @@ validates against the same table before sending. Pick `agnes-video-2.5-flash` an
 collapses to 720P, because that model accepts nothing else upstream — so the UI can never offer a
 value the API would reject with HTTP 400.
 
+**A result can be continued.** A finished image card offers "Continue editing": its prompt, model,
+resolution, aspect ratio and reference images come back into the composer, and the picture itself is
+submitted as the next request's **reference image** (image-to-image) — say what should change and what
+must stay in the prompt. A failed card offers "Edit & retry": no retyping, the parameters return to the
+form for adjustment. Both actions create a **new record** and keep the original one; the new card is
+marked "From <record id>" so the history shows the before → after pair. Finished videos are excluded:
+upstream has no endpoint that edits or extends an existing video, and its "reference video" input needs
+a publicly reachable URL and only the paid `agnes-video-2.5` accepts it, so a finished video card
+offers download and delete only. A failed video can still be edited and retried.
+
 ## Install
 
 **The user** installs from the DSH Desktop Client or Web UI **Plugins** manager. Once published, enter
@@ -113,6 +123,15 @@ the command above if you no longer want the files.
   one more failure per attempt. The progress is shown **inside that card itself** (spinner, "retrying;
   this record updates when it finishes", cancel) — no second "new task" card appears beside it waiting
   to merge, and the work is not repeated in the background banner.
+- **Continue editing and edit & retry.** "Continue editing" on a finished image fills the composer
+  with that record's original request (prompt, model, resolution, ratio, references) and shows the
+  source picture above the form. On submit the Host reads the stored bytes and inlines them as a
+  `data:` URI reference, because the generated media is served behind same-origin authentication and
+  upstream cannot fetch it — the browser only says which record to use. "Edit & retry" on a failed
+  card restores the prompt and parameters only (a failed task produced no artifact), then re-runs as a
+  new record. Neither action reuses the original record id: the original stays, the new record carries
+  `derivedFrom` and the "From …" marker. If the source record is deleted before submitting, the Host
+  refuses immediately with an explanation instead of leaving an unexplained failed card.
 - **Prompt optimization.** The "Improve prompt" button in the prompt box calls Agnes' text model
   (`agnes-3.0-flash`) to make the draft more specific, with different advice for stills (composition,
   light, lens) and video (motion, camera movement, pacing), preserving your language and subject.
@@ -131,6 +150,15 @@ the command above if you no longer want the files.
 - When the account balance cannot cover a task, upstream returns 403 `insufficient_user_quota`; the
   plugin reports it as an exhausted balance and says the key itself is valid, rather than blaming the
   key. The paid `agnes-video-2.5` consumes quota; `agnes-video-2.5-flash` is free but shares a queue.
+- **A finished video cannot be continued**: upstream only offers text-to-video, keyframes and reference
+  material — no editing, extension or remix of an existing video. The only "reference video" input
+  needs a publicly reachable URL and only the paid `agnes-video-2.5` accepts it, while this plugin
+  stores results locally behind the same-origin route and has no channel to make them public. A
+  finished video therefore offers download and delete; a failed video can still be edited and retried.
+- "Continue editing" inlines the stored picture as a `data:` URI reference, so the source never needs
+  a public URL; the cost is a request body that grows with the source resolution (about 2 MiB at 1K,
+  20 MiB+ at 4K). Upstream may reject an oversized request, which surfaces as an ordinary failure
+  that can be retried at a lower resolution tier.
 - `agnes-video-2.5-flash` accepts no reference video and at most 5 reference images (`2.5` takes 8).
 - Generations are **local** and do not sync across machines; records past `historyLimit` are deleted.
 - The panel runs one task at a time, so a double submit cannot double the cost or deepen the queue.
@@ -147,17 +175,19 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 161 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 177 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering
-  (including a retry turning its own card into the progress card with no placeholder added),
-  image-viewer interaction, the background-job lifecycle (state reporting a running job, a background
-  failure landing as a record, cancel leaving no record, dispose aborting every job, prompt
-  optimization), and the SHIPPED client bundle (loaded and rendered through the real loader envelope).
+  (including a retry turning its own card into the progress card with no placeholder added; a finished
+  image filling the composer and submitting as a symbolic reference; a failed record restored for
+  adjustment; a finished video offering no continuation), image-viewer interaction, the background-job
+  lifecycle (state reporting a running job, a background failure landing as a record, cancel leaving no
+  record, dispose aborting every job, prompt optimization), and the SHIPPED client bundle (loaded and
+  rendered through the real loader envelope).
 - Packed tarball installed into a disposable isolated profile: `--dump-config` composition, bounded
   real startup, authenticated `/api` calls, a real image generation downloaded through the media
   route, records and files surviving a restart, and the file disappearing after deletion.
-- Real headless Chrome driving the DSH Web app — 33 checks (the two retry checks need a real API key;
-  without one they are skipped and reported as such): sidebar entry, panel render, the
+- Real headless Chrome driving the DSH Web app — 36 checks (the two retry and three continue-editing
+  checks need a real API key; without one they are skipped and reported as such): sidebar entry, panel render, the
   two-pane layout (measured: both panes side by side, the composer not spanning the panel), the
   model-derived controls **and their shape** (four resolutions are a segmented control, eight ratios
   are chips), Flash narrowing the resolution list, the generate button reachable without scrolling,
@@ -168,15 +198,20 @@ the command above if you no longer want the files.
   the zoom per picture, and returns focus to the control that opened it), the prompt optimizer being
   in place, no phantom in-flight UI while idle, and a **retry rendering in place** (the failed record's
   own card becomes the progress card, zero placeholder cards, no duplicated background banner, the
-  card count unchanged, and the same record settling in its original slot). Evidence is in
-  `docs/evidence/`.
+  card count unchanged, and the same record settling in its original slot), and **continue editing**
+  (the prompt restored, the source thumbnail shown, the card count unchanged, the submit button
+  reading "Generate edit"; submitting really runs a `data:` URI image-to-image generation, adds one
+  card, marks the new card with its lineage, and the store keeps the symbolic reference and
+  `derivedFrom`). Evidence is in `docs/evidence/`.
 - Real-key end-to-end runs (not in CI): submit an image, leave the panel, come back while it is still
   rendering and see it running, then watch it settle into a result card; the same running job is still
   shown as running after a **full page reload**, then settles into a result card; submit a video that
   fails, reload the whole page, click retry on the failed record, and see a real job start with the
   card count unchanged; click retry on a failed record and see the progress only inside that card
   (no extra "new task" card), then the same record turn into the generated result in its original
-  slot — verified after a full page reload as well.
+  slot — verified after a full page reload as well; click continue editing on a finished image, watch
+  the composer fill in with its source, submit, and see upstream accept the inlined picture as a
+  reference while the original card stays and the new card carries its lineage.
 
 ## Development
 
