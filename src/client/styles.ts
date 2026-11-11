@@ -7,10 +7,23 @@ import { createElement, type ReactElement } from 'react'
  * unmounting the panel removes the rules with no global residue — the Client
  * contract keeps component-local styles inside the component.
  *
- * Every color is either `currentColor`, a `color-mix()` against it, or a
- * translucent overlay, so the panel inherits the host theme in both light and
- * dark mode without naming a token that may not exist in this DSH version.
- * The only fixed colors are the two capability accents, which are artwork.
+ * ## Why host tokens instead of `currentColor` mixes
+ *
+ * The previous sheet derived every surface from `color-mix(in srgb, currentColor
+ * N%, transparent)`. That follows the text colour, but it cannot express a
+ * *raised* surface: in light mode every card, input and chip collapsed into the
+ * same near-white wash, and in dark mode into the same near-black one. The panel
+ * therefore read as one flat grey field with no hierarchy.
+ *
+ * The host publishes real design tokens (`@deepseek-ai/dsh-client-ui-theme`
+ * injects `--dsw-*` custom properties on `body`, and flips them under
+ * `body[data-ds-dark-theme]`). Reading them means the panel inherits the exact
+ * surfaces, borders, radii and elevations the surrounding app uses, in both
+ * themes, without this package shipping a second palette. Every read carries a
+ * fallback so an older DSH line that lacks a token still renders.
+ *
+ * The only fixed colours are the two capability accents. They are artwork, not
+ * chrome: the panel is Agnes, and a black-and-white button would lose that.
  */
 
 /** Accent hues for the two capabilities; the rest of the palette is inherited. */
@@ -18,226 +31,1068 @@ export const ACCENT_IMAGE = '#4f46e5'
 export const ACCENT_VIDEO = '#0ea5e9'
 
 export const STUDIO_CSS = `
+/* ---------------------------------------------------------------------------
+   Tokens
+   ---------------------------------------------------------------------------
+   Declared on the panel root so every rule below reads one name. "--a-*" values
+   are host tokens with a local fallback; the fallbacks are the light-theme
+   values the host itself uses, so a DSH line without the token degrades to a
+   correct-looking panel rather than to no styling.
+   ------------------------------------------------------------------------- */
 .agnes {
+  --a-surface: var(--dsw-alias-bg-layer-1, #fff);
+  --a-surface-2: var(--dsw-alias-bg-layer-2, #f9fafb);
+  --a-field: var(--dsw-specific-input-major, #fff);
+  --a-border: var(--dsw-alias-border-l1, rgba(15, 17, 21, 0.06));
+  --a-border-strong: var(--dsw-alias-border-l2, rgba(15, 17, 21, 0.12));
+  --a-fg: var(--dsw-alias-label-primary, #0f1115);
+  --a-fg-2: var(--dsw-alias-label-secondary, #61666b);
+  --a-fg-3: var(--dsw-alias-label-tertiary, #81858c);
+  --a-danger: var(--dsw-alias-state-error-primary, #ec1313);
+  --a-warn: var(--dsw-alias-state-warn-primary, #f59e0b);
+  --a-ok: var(--dsw-alias-state-success-primary, #22c55e);
+  --a-radius-sm: var(--dsw-radius-sm, 8px);
+  --a-radius: var(--dsw-radius-md, 12px);
+  --a-radius-lg: var(--dsw-radius-lg, 16px);
+  --a-shadow: var(--dsw-elevation-panel, 0 1px 2px rgba(0, 0, 0, 0.05));
+  --a-shadow-lift: var(--dsw-elevation-prominent, 0 2px 6px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.06));
+
+  --a-accent: ${ACCENT_IMAGE};
+  --a-accent-2: ${ACCENT_VIDEO};
+  --a-accent-soft: color-mix(in srgb, var(--a-accent) 12%, transparent);
+  --a-accent-line: color-mix(in srgb, var(--a-accent) 42%, transparent);
+
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   height: 100%;
   min-height: 0;
-  padding: 20px 24px 28px;
-  color: inherit;
+  box-sizing: border-box;
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 16px 22px 14px;
+  color: var(--a-fg);
   font-size: 13px;
   line-height: 1.55;
-  overflow: auto;
+  /* The page itself does not scroll: the two panes do, independently. A single
+     page scroll made the composer's submit button fall below the fold on the
+     video tab, so the primary action of the panel needed a page scroll to
+     reach — on a screen where nothing else was moving. */
+  overflow: hidden;
 }
 
-.agnes__head { display: flex; flex-direction: column; gap: 4px; }
-.agnes__title { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -0.01em; }
-.agnes__subtitle { margin: 0; opacity: 0.62; font-size: 12px; }
+/* The dark theme lightens the accent: the light-mode indigo is too dark to read
+   as a 12px label on a near-black surface, and too dark to show as a 1px border. */
+[data-ds-dark-theme] .agnes {
+  --a-accent: #818cf8;
+  --a-accent-2: #38bdf8;
+}
 
-.agnes__tabs { display: inline-flex; gap: 4px; padding: 3px; border-radius: 10px; background: color-mix(in srgb, currentColor 7%, transparent); align-self: flex-start; }
+/* ---------------------------------------------------------------------------
+   Header
+   ------------------------------------------------------------------------- */
+.agnes__header { display: flex; align-items: flex-start; gap: 11px; flex: none; }
+
+.agnes__brandMark {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 11px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--a-accent), var(--a-accent-2));
+  box-shadow: 0 1px 2px rgba(30, 27, 75, 0.2), 0 6px 14px -6px rgba(79, 70, 229, 0.55);
+}
+
+.agnes__head { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.agnes__title {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--a-fg);
+}
+.agnes__subtitle {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--a-fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agnes__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+  margin-top: 3px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--a-border);
+  border-radius: 999px;
+  background: var(--a-surface-2);
+  color: var(--a-fg-2);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.agnes__statusDot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--a-ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--a-ok) 16%, transparent);
+}
+.agnes__status--off { color: var(--a-fg-3); }
+.agnes__status--off .agnes__statusDot {
+  background: var(--a-warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--a-warn) 16%, transparent);
+}
+.agnes__status--loading .agnes__statusDot {
+  background: var(--a-fg-3);
+  box-shadow: none;
+  animation: agnes-pulse 1.4s ease-in-out infinite;
+}
+@keyframes agnes-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+/* ---------------------------------------------------------------------------
+   Two-pane body
+   ---------------------------------------------------------------------------
+   A single 1200px-wide column made every input 1200px wide and pushed the
+   gallery below the fold. Composer left, results right: the prompt field gets a
+   readable measure, and the gallery gets the space a picture grid needs.
+   ------------------------------------------------------------------------- */
+.agnes__body {
+  display: grid;
+  grid-template-columns: minmax(0, 372px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+@media (max-width: 940px) {
+  /* One column cannot split the remaining height between two scrolling panes
+     without each getting half of it, so the page scrolls again and the panes
+     stop clipping. */
+  .agnes { overflow: auto; }
+  .agnes__body { display: flex; flex-direction: column; overflow: visible; }
+  .agnes__composer,
+  .agnes__gallery { overflow: visible; max-height: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   Composer
+   ------------------------------------------------------------------------- */
+.agnes__composer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid var(--a-border);
+  border-radius: var(--a-radius-lg);
+  background: var(--a-surface);
+  box-shadow: var(--a-shadow);
+}
+
+/* The scrolling half of the composer: tabs, notices and the fields.
+   The mask is the scroll affordance: a pane that clips a row of chips mid-height
+   with no fade reads as a layout bug, not as "there is more below". */
+.agnes__composerScroll {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+  padding-bottom: 8px;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 22px), transparent 100%);
+}
+
+/* The pinned action row. Without it the submit is the last thing in a long form
+   and scrolls out of reach on the video tab, which reads as "there is no way to
+   submit this". */
+.agnes__composerFoot {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: none;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--a-border);
+}
+
+.agnes__tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--a-border);
+  border-radius: 10px;
+  background: var(--a-surface-2);
+}
 .agnes__tab {
-  appearance: none; border: 0; cursor: pointer; border-radius: 8px;
-  padding: 6px 14px; font: inherit; font-size: 12px; font-weight: 550;
-  color: inherit; background: transparent; opacity: 0.7;
-  transition: background 120ms ease, opacity 120ms ease;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--a-fg-3);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }
-.agnes__tab:hover { opacity: 1; background: color-mix(in srgb, currentColor 8%, transparent); }
-.agnes__tab--on { opacity: 1; background: color-mix(in srgb, currentColor 14%, transparent); }
-.agnes__tab:focus-visible { outline: 2px solid ${ACCENT_IMAGE}; outline-offset: 2px; }
-
-.agnes__notice {
-  display: flex; flex-direction: column; gap: 6px;
-  padding: 12px 14px; border-radius: 10px;
-  border: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
-  background: color-mix(in srgb, #f59e0b 12%, transparent);
+.agnes__tab:hover { color: var(--a-fg); background: color-mix(in srgb, var(--a-fg) 5%, transparent); }
+.agnes__tab--on {
+  color: var(--a-fg);
+  font-weight: 600;
+  background: var(--a-surface);
+  border-color: var(--a-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.07);
 }
-.agnes__noticeTitle { font-weight: 600; }
-.agnes__noticeBody { opacity: 0.8; font-size: 12px; }
-.agnes__meta { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; opacity: 0.6; }
+.agnes__tab--on .agnes__tabIcon { color: var(--a-accent); }
+.agnes__tab:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 1px; }
+.agnes__tabIcon { display: inline-flex; flex: none; color: currentColor; transition: color 120ms ease; }
 
-.agnes__form { display: flex; flex-direction: column; gap: 12px; }
-.agnes__label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; font-weight: 600; opacity: 0.85; letter-spacing: 0.01em; }
+.agnes__form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.agnes__label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--a-fg-2);
+  letter-spacing: 0.01em;
+}
+
+/* A prompt field with its own footer: the counter and the example row live
+   inside the same border, so the control reads as one box. */
+.agnes__promptBox {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--a-border-strong);
+  border-radius: var(--a-radius);
+  background: var(--a-field);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.agnes__promptBox:hover { border-color: color-mix(in srgb, var(--a-fg) 22%, transparent); }
+.agnes__promptBox:focus-within {
+  border-color: var(--a-accent);
+  box-shadow: 0 0 0 3px var(--a-accent-soft);
+}
+.agnes__prompt {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 84px;
+  padding: 9px 11px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--a-fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+.agnes__prompt::placeholder { color: var(--a-fg-3); }
+.agnes__prompt:disabled { cursor: not-allowed; opacity: 0.6; }
+.agnes__promptFoot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 9px 6px;
+  min-height: 20px;
+}
+.agnes__counter {
+  margin-left: auto;
+  flex: none;
+  font-size: 10.5px;
+  color: var(--a-fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.agnes__counter--near { color: var(--a-warn); }
+
+/* Example prompts: three chips that fill the empty composer. Without them the
+   first run is a blank textarea and a disabled-looking button. */
+.agnes__examples { display: flex; flex-wrap: wrap; gap: 4px; }
+.agnes__example {
+  appearance: none;
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px dashed var(--a-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--a-fg-3);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.agnes__example:hover:not(:disabled) {
+  color: var(--a-accent);
+  border-color: var(--a-accent-line);
+  background: var(--a-accent-soft);
+}
+.agnes__example:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Select with a positioned chevron; "appearance: none" alone leaves no affordance. */
+.agnes__selectWrap { position: relative; display: block; }
+.agnes__selectWrap .agnes__chevron {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--a-fg-3);
+}
 .agnes__field {
-  appearance: none; width: 100%; box-sizing: border-box;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-  border-radius: 9px; padding: 8px 10px;
-  background: color-mix(in srgb, currentColor 4%, transparent);
-  color: inherit; font: inherit; font-size: 13px; font-weight: 400;
+  appearance: none;
+  width: 100%;
+  box-sizing: border-box;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--a-border-strong);
+  border-radius: var(--a-radius-sm);
+  background: var(--a-field);
+  color: var(--a-fg);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
-.agnes__field:focus-visible { outline: 2px solid ${ACCENT_IMAGE}; outline-offset: 1px; border-color: transparent; }
-.agnes__field:disabled { opacity: 0.5; cursor: not-allowed; }
-textarea.agnes__field { min-height: 84px; resize: vertical; line-height: 1.5; }
-select.agnes__field { cursor: pointer; }
+.agnes__field:hover:not(:disabled) { border-color: color-mix(in srgb, var(--a-fg) 22%, transparent); }
+.agnes__field:focus-visible {
+  outline: none;
+  border-color: var(--a-accent);
+  box-shadow: 0 0 0 3px var(--a-accent-soft);
+}
+.agnes__field:disabled { opacity: 0.55; cursor: not-allowed; }
+select.agnes__field { padding-right: 28px; cursor: pointer; }
+textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resize: vertical; line-height: 1.55; }
 
-.agnes__row { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; }
-.agnes__hint { font-size: 11px; opacity: 0.58; font-weight: 400; }
+.agnes__row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
+/* Segmented single-choice control: 2–4 options, every option visible, one press
+   to change. A <select> hides the alternatives behind a popup and, at four
+   options, costs a click more for no benefit. */
+.agnes__seg {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--a-border);
+  border-radius: 9px;
+  background: var(--a-surface-2);
+}
+.agnes__segBtn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 25px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--a-fg-3);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+.agnes__segBtn:hover:not(:disabled) { color: var(--a-fg); background: color-mix(in srgb, var(--a-fg) 6%, transparent); }
+.agnes__segBtn--on {
+  color: var(--a-fg);
+  font-weight: 600;
+  background: var(--a-surface);
+  border-color: var(--a-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.agnes__segBtn:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 1px; }
+.agnes__segBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Option chips: larger sets (8 ratios, 9 durations) that would not fit a
+   segmented control without shrinking the labels to illegibility. */
+.agnes__chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.agnes__chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 25px;
+  padding: 0 9px;
+  border: 1px solid var(--a-border);
+  border-radius: 999px;
+  background: var(--a-surface-2);
+  color: var(--a-fg-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.agnes__chip:hover:not(:disabled) { color: var(--a-fg); border-color: var(--a-border-strong); }
+.agnes__chip--on {
+  color: var(--a-accent);
+  border-color: var(--a-accent-line);
+  background: var(--a-accent-soft);
+  font-weight: 600;
+}
+.agnes__chip:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 1px; }
+.agnes__chip:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* A tiny proportional box, so "16:9" is recognisable before it is read. */
+.agnes__ratioGlyph {
+  display: block;
+  flex: none;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  opacity: 0.75;
+}
+
+.agnes__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--a-fg-3);
+}
+.agnes__hintRow { display: flex; align-items: center; gap: 6px; margin-top: -4px; }
+
+/* References */
 .agnes__refs { display: flex; flex-direction: column; gap: 6px; }
 .agnes__refRow { display: flex; gap: 6px; align-items: center; }
-.agnes__refRow .agnes__field { flex: 1; }
+.agnes__refRow .agnes__field { flex: 1; min-width: 0; }
+.agnes__refAdd {
+  appearance: none;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 27px;
+  padding: 0 10px;
+  border: 1px dashed var(--a-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--a-fg-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.agnes__refAdd:hover:not(:disabled) {
+  color: var(--a-accent);
+  border-color: var(--a-accent-line);
+  background: var(--a-accent-soft);
+}
+.agnes__refAdd:disabled { opacity: 0.5; cursor: not-allowed; }
+.agnes__refAdd:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 2px; }
 
-.agnes__actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+/* ---------------------------------------------------------------------------
+   Buttons
+   ------------------------------------------------------------------------- */
 .agnes__button {
-  appearance: none; cursor: pointer; border-radius: 9px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-  background: transparent; color: inherit; font: inherit; font-size: 12px; font-weight: 600;
-  padding: 7px 14px; transition: background 120ms ease, opacity 120ms ease;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--a-border-strong);
+  border-radius: var(--a-radius-sm);
+  background: var(--a-surface);
+  color: var(--a-fg);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 80ms ease;
 }
-.agnes__button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 9%, transparent); }
-.agnes__button:disabled { opacity: 0.45; cursor: not-allowed; }
-.agnes__button:focus-visible { outline: 2px solid ${ACCENT_IMAGE}; outline-offset: 2px; }
+.agnes__button:hover:not(:disabled) { background: color-mix(in srgb, var(--a-fg) 5%, var(--a-surface)); }
+.agnes__button:active:not(:disabled) { transform: translateY(1px); }
+.agnes__button:disabled { opacity: 0.5; cursor: not-allowed; }
+.agnes__button:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 2px; }
+
+/* The one accent-filled control in the panel.
+   The previous version kept the gradient and dropped it to "opacity: .45" when
+   disabled, which over a white page is a pale lilac slab with white text on it —
+   unreadable, and it made the panel's primary action look broken rather than
+   unavailable. A disabled primary is now a flat muted surface, and the gradient
+   only ever appears at full strength. */
 .agnes__button--primary {
-  border-color: transparent; color: #fff;
-  background: linear-gradient(135deg, ${ACCENT_IMAGE}, ${ACCENT_VIDEO});
+  width: 100%;
+  height: 36px;
+  border-color: transparent;
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  background: linear-gradient(135deg, ${ACCENT_IMAGE} 0%, ${ACCENT_IMAGE} 42%, ${ACCENT_VIDEO} 100%);
+  box-shadow: 0 1px 2px rgba(30, 27, 75, 0.22), 0 6px 16px -7px rgba(79, 70, 229, 0.6);
 }
-.agnes__button--primary:hover:not(:disabled) { filter: brightness(1.08); background: linear-gradient(135deg, ${ACCENT_IMAGE}, ${ACCENT_VIDEO}); }
-.agnes__button--danger { border-color: color-mix(in srgb, #ef4444 55%, transparent); color: #ef4444; }
-.agnes__button--ghost { border-color: transparent; opacity: 0.75; font-weight: 500; }
-.agnes__button--ghost:hover:not(:disabled) { opacity: 1; }
+.agnes__button--primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, ${ACCENT_IMAGE} 0%, ${ACCENT_IMAGE} 42%, ${ACCENT_VIDEO} 100%);
+  filter: brightness(1.07) saturate(1.04);
+  box-shadow: 0 2px 4px rgba(30, 27, 75, 0.24), 0 10px 22px -8px rgba(79, 70, 229, 0.7);
+}
+.agnes__button--primary:disabled {
+  background: var(--a-surface-2);
+  border-color: var(--a-border);
+  color: var(--a-fg-3);
+  box-shadow: none;
+  filter: none;
+  opacity: 1;
+}
+.agnes__button--danger { color: var(--a-danger); border-color: color-mix(in srgb, var(--a-danger) 40%, transparent); }
+.agnes__button--danger:hover:not(:disabled) { background: color-mix(in srgb, var(--a-danger) 9%, var(--a-surface)); }
+.agnes__button--ghost { border-color: transparent; background: transparent; color: var(--a-fg-2); font-weight: 500; }
+.agnes__button--ghost:hover:not(:disabled) { background: color-mix(in srgb, var(--a-fg) 7%, transparent); color: var(--a-fg); }
+
+.agnes__iconBtn {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--a-fg-3);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.agnes__iconBtn:hover:not(:disabled) { background: color-mix(in srgb, var(--a-fg) 8%, transparent); color: var(--a-fg); }
+.agnes__iconBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.agnes__iconBtn:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 1px; }
+.agnes__iconBtn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--a-danger) 12%, transparent);
+  color: var(--a-danger);
+}
+
+.agnes__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+
+/* ---------------------------------------------------------------------------
+   Notices, errors, progress
+   ------------------------------------------------------------------------- */
+.agnes__notice {
+  display: flex;
+  gap: 9px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--a-warn) 38%, transparent);
+  border-radius: var(--a-radius);
+  background: color-mix(in srgb, var(--a-warn) 9%, transparent);
+}
+.agnes__noticeIcon { flex: none; margin-top: 1px; color: var(--a-warn); }
+.agnes__noticeText { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.agnes__noticeTitle { font-size: 12px; font-weight: 600; color: var(--a-fg); }
+.agnes__noticeBody { font-size: 11.5px; line-height: 1.5; color: var(--a-fg-2); }
+
+.agnes__error {
+  display: flex;
+  gap: 9px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--a-danger) 36%, transparent);
+  border-radius: var(--a-radius);
+  background: color-mix(in srgb, var(--a-danger) 7%, transparent);
+}
+.agnes__errorIcon { flex: none; margin-top: 1px; color: var(--a-danger); }
+.agnes__errorText { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.agnes__errorTitle { font-size: 12px; font-weight: 600; color: var(--a-fg); }
+.agnes__errorBody { font-size: 11.5px; line-height: 1.5; color: var(--a-fg-2); white-space: pre-wrap; word-break: break-word; }
+.agnes__error .agnes__actions { gap: 5px; margin-top: 2px; }
+.agnes__error .agnes__button { height: 26px; font-size: 11.5px; padding: 0 10px; }
 
 .agnes__busy {
-  display: flex; align-items: center; gap: 9px;
-  padding: 11px 14px; border-radius: 10px;
-  background: color-mix(in srgb, ${ACCENT_IMAGE} 12%, transparent);
-  border: 1px solid color-mix(in srgb, ${ACCENT_IMAGE} 35%, transparent);
-  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 11px;
+  border: 1px solid var(--a-accent-line);
+  border-radius: var(--a-radius);
+  background: var(--a-accent-soft);
 }
+.agnes__busyRow { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--a-fg); }
+.agnes__busyTrack {
+  position: relative;
+  height: 2px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--a-accent) 20%, transparent);
+}
+.agnes__busyBar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--a-accent), transparent);
+  animation: agnes-indeterminate 1.5s ease-in-out infinite;
+}
+@keyframes agnes-indeterminate {
+  0% { transform: translateX(-105%); }
+  100% { transform: translateX(370%); }
+}
+
 .agnes__spinner {
-  width: 13px; height: 13px; flex: none; border-radius: 50%;
-  border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
-  border-top-color: ${ACCENT_IMAGE};
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--a-accent) 25%, transparent);
+  border-top-color: var(--a-accent);
   animation: agnes-spin 700ms linear infinite;
 }
 @keyframes agnes-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .agnes__spinner { animation-duration: 2.4s; } }
 
-.agnes__error {
-  display: flex; flex-direction: column; gap: 7px;
-  padding: 11px 14px; border-radius: 10px;
-  border: 1px solid color-mix(in srgb, #ef4444 45%, transparent);
-  background: color-mix(in srgb, #ef4444 10%, transparent);
-  font-size: 12px;
+/* ---------------------------------------------------------------------------
+   Gallery
+   ------------------------------------------------------------------------- */
+.agnes__gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
 }
-.agnes__errorTitle { font-weight: 600; }
-.agnes__errorBody { opacity: 0.85; white-space: pre-wrap; word-break: break-word; }
 
-.agnes__galleryHead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.agnes__galleryTitle { margin: 0; font-size: 13px; font-weight: 650; }
-.agnes__count { font-size: 11px; opacity: 0.55; font-variant-numeric: tabular-nums; }
+.agnes__galleryHead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 2px;
+  background: var(--dsw-alias-bg-base, Canvas);
+}
+.agnes__galleryTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--a-fg);
+}
+.agnes__count {
+  padding: 1px 7px;
+  border: 1px solid var(--a-border);
+  border-radius: 999px;
+  background: var(--a-surface-2);
+  color: var(--a-fg-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 .agnes__spacer { flex: 1; }
 
-.agnes__filters { display: inline-flex; gap: 3px; }
-.agnes__chip {
-  appearance: none; cursor: pointer; border: 0; border-radius: 999px;
-  padding: 3px 10px; font: inherit; font-size: 11px; font-weight: 550;
-  color: inherit; background: transparent; opacity: 0.62;
+.agnes__filters {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--a-border);
+  border-radius: 999px;
+  background: var(--a-surface-2);
 }
-.agnes__chip:hover { opacity: 1; }
-.agnes__chip--on { opacity: 1; background: color-mix(in srgb, currentColor 12%, transparent); }
+.agnes__filter {
+  appearance: none;
+  height: 21px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--a-fg-3);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.agnes__filter:hover { color: var(--a-fg); }
+.agnes__filter--on {
+  color: var(--a-fg);
+  background: var(--a-surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.09);
+}
+.agnes__filter:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 1px; }
 
 .agnes__empty {
-  padding: 26px 18px; border-radius: 12px; text-align: center;
-  border: 1px dashed color-mix(in srgb, currentColor 22%, transparent);
-  opacity: 0.66; font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 46px 22px;
+  border: 1px dashed var(--a-border-strong);
+  border-radius: var(--a-radius-lg);
+  background: color-mix(in srgb, var(--a-fg) 1.5%, transparent);
+  text-align: center;
 }
+.agnes__emptyIcon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 2px;
+  border: 1px solid var(--a-border);
+  border-radius: 13px;
+  background: var(--a-surface);
+  color: var(--a-fg-3);
+  box-shadow: var(--a-shadow);
+}
+.agnes__emptyTitle { font-size: 12.5px; font-weight: 600; color: var(--a-fg-2); }
+.agnes__emptyBody { max-width: 36ch; font-size: 11.5px; line-height: 1.55; color: var(--a-fg-3); }
 
 .agnes__grid {
-  display: grid; gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  display: grid;
+  gap: 13px;
+  grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
   align-items: start;
+  padding-bottom: 6px;
 }
 
 .agnes__card {
-  display: flex; flex-direction: column; gap: 8px;
-  border-radius: 12px; overflow: hidden;
-  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
-  background: color-mix(in srgb, currentColor 3%, transparent);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--a-border);
+  border-radius: var(--a-radius);
+  background: var(--a-surface);
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
-.agnes__card--failed { border-color: color-mix(in srgb, #ef4444 40%, transparent); }
+.agnes__card:hover {
+  border-color: var(--a-border-strong);
+  box-shadow: var(--a-shadow-lift);
+  transform: translateY(-1px);
+}
+.agnes__card--failed { border-color: color-mix(in srgb, var(--a-danger) 38%, transparent); }
+
+/* A uniform 4:3 frame with "cover": a ragged grid of natural aspect ratios
+   leaves holes under every short card and reads as a layout bug. The crop is a
+   preview only — the viewer shows the whole picture. */
+.agnes__thumbFrame,
+.agnes__thumbButton {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  background: var(--a-surface-2);
+}
+.agnes__thumbButton { appearance: none; color: inherit; font: inherit; cursor: zoom-in; }
+.agnes__thumbButton:disabled { cursor: default; }
 .agnes__thumb {
-  display: block; width: 100%; height: 168px; object-fit: cover;
-  background: color-mix(in srgb, currentColor 7%, transparent);
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 240ms ease;
 }
-.agnes__body { display: flex; flex-direction: column; gap: 6px; padding: 0 10px 10px; }
-.agnes__prompt {
-  margin: 0; font-size: 12px; line-height: 1.45;
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+.agnes__thumbButton:hover .agnes__thumb { transform: scale(1.025); }
+
+/* Hover affordance on the thumbnail: without it nothing signals that the
+   picture is clickable, and the 打开原图 button below the fold was the only hint. */
+.agnes__thumbVeil {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  color: #fff;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0) 35%, rgba(0, 0, 0, 0.42) 100%);
+  opacity: 0;
+  transition: opacity 150ms ease;
 }
-.agnes__facts { display: flex; flex-wrap: wrap; gap: 8px; font-size: 10.5px; opacity: 0.6; font-variant-numeric: tabular-nums; }
-.agnes__cardActions { display: flex; flex-wrap: wrap; gap: 6px; }
-.agnes__cardActions .agnes__button { padding: 4px 9px; font-size: 11px; font-weight: 550; }
-.agnes__failText { margin: 0; font-size: 11.5px; color: #ef4444; word-break: break-word; }
-.agnes__retryHint { font-size: 10.5px; opacity: 0.6; }
+.agnes__thumbVeilInner {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  background: rgba(12, 14, 20, 0.42);
+  backdrop-filter: blur(6px);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.agnes__thumbButton:hover .agnes__thumbVeil,
+.agnes__thumbButton:focus-visible .agnes__thumbVeil { opacity: 1; }
+.agnes__thumbButton:focus-visible { outline: 2px solid var(--a-accent); outline-offset: -2px; }
+
+/* A failed record has no picture: show the error glyph on the empty frame so the
+   card is not a blank grey rectangle with a caption. */
+.agnes__thumbEmpty {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: color-mix(in srgb, var(--a-danger) 60%, transparent);
+  background: color-mix(in srgb, var(--a-danger) 5%, transparent);
+}
+
+/* A video keeps its own aspect: letterboxing a 16:9 clip inside a 4:3 frame with
+   "cover" would crop the picture the user is trying to watch. */
+.agnes__thumb--contain { object-fit: contain; background: #0b0d12; }
+
+/* The in-flight card.
+   The previous panel showed a single line of text above the gallery while a
+   request ran, so a slow video looked like nothing was happening. A skeleton
+   card in the grid occupies the slot the result will fill. */
+.agnes__card--pending { pointer-events: none; }
+.agnes__pendingShine {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 20%, color-mix(in srgb, var(--a-fg) 6%, transparent) 50%, transparent 80%);
+  background-size: 220% 100%;
+  animation: agnes-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes agnes-shimmer {
+  0% { background-position: 130% 0; }
+  100% { background-position: -30% 0; }
+}
+.agnes__pendingBadge {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  font-size: 10.5px;
+  font-weight: 550;
+  color: var(--a-fg-2);
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--a-surface) 88%, transparent));
+}
+.agnes__pendingLine {
+  display: block;
+  height: 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--a-fg) 8%, transparent);
+}
+
+.agnes__cardBody { display: flex; flex-direction: column; gap: 6px; padding: 9px 10px 10px; }
+.agnes__promptText {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--a-fg);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.agnes__facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.agnes__fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--a-fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.agnes__factDot { width: 2px; height: 2px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.agnes__failText { margin: 0; font-size: 11px; line-height: 1.45; color: var(--a-danger); word-break: break-word; }
+.agnes__retryHint { font-size: 10px; color: var(--a-fg-3); }
+
+.agnes__cardActions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin-top: 1px;
+  padding-top: 6px;
+  border-top: 1px solid var(--a-border);
+}
+.agnes__open {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--a-fg-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.agnes__open:hover:not(:disabled) { background: color-mix(in srgb, var(--a-fg) 7%, transparent); color: var(--a-fg); }
+.agnes__open:disabled { opacity: 0.45; cursor: not-allowed; }
+.agnes__open:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 1px; }
 
 .agnes__srOnly {
-  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
-/* The thumbnail is the second way into the viewer.
-   It wraps the existing <img>/<video> instead of adding a second control: a
-   click on the picture is the gesture users already try, and the card keeps
-   exactly one .agnes__open button for the accessible, keyboard-reachable path. */
-.agnes__thumbButton {
-  appearance: none; display: block; width: 100%; padding: 0; margin: 0;
-  border: 0; background: transparent; cursor: zoom-in; position: relative;
-  color: inherit; font: inherit; line-height: 0;
-}
-.agnes__thumbButton:focus-visible { outline: 2px solid ${ACCENT_IMAGE}; outline-offset: -2px; }
-.agnes__thumbButton:disabled { cursor: default; }
-/* The open button replaces the old new-window link. Same visual weight as the
-   download control beside it, but it is a button: the link went nowhere in the
-   Desktop shell (the window-open handler denies every popup), so the panel now
-   owns the zoom itself. */
-.agnes__open {
-  appearance: none; cursor: pointer; border-radius: 9px;
-  border: 1px solid transparent; background: transparent; color: inherit;
-  font: inherit; font-size: 11px; font-weight: 500; padding: 4px 9px;
-  opacity: 0.75; transition: background 120ms ease, opacity 120ms ease;
-}
-.agnes__open:hover:not(:disabled) { opacity: 1; background: color-mix(in srgb, currentColor 9%, transparent); }
-.agnes__open:disabled { opacity: 0.45; cursor: not-allowed; }
-.agnes__open:focus-visible { outline: 2px solid ${ACCENT_IMAGE}; outline-offset: 2px; }
-
-/* The in-panel lightbox.
-   Rendered in the component tree with position: fixed rather than through a
-   portal: the browser bundle's envelope can only resolve react, so importing
+/* ---------------------------------------------------------------------------
+   Lightbox
+   ---------------------------------------------------------------------------
+   Rendered in the component tree with "position: fixed" rather than through a
+   portal: the browser bundle's envelope can only resolve "react", so importing
    react-dom would break module loading. A fixed overlay is enough because the
    panel's own scroll container establishes no containing block for it.
-   Colors here are deliberately literal black/white: the sheet sits on top of the
-   whole app in both themes, and a theme token would make the backdrop follow the
-   page instead of dimming it. */
+   Colours here are literal black/white on purpose: the sheet sits above the whole
+   app in both themes, and a theme token would make the backdrop follow the page
+   instead of dimming it.
+   ------------------------------------------------------------------------- */
 .agnes__lightbox {
-  position: fixed; inset: 0; z-index: 2147483000;
-  display: flex; flex-direction: column;
-  background: rgba(0, 0, 0, 0.82);
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  background: rgba(7, 9, 13, 0.9);
   color: #fff;
-  animation: agnes-lightbox-in 120ms ease-out both;
+  animation: agnes-lightbox-in 130ms ease-out both;
 }
 @keyframes agnes-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
 
 .agnes__lightboxBar {
-  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
-  flex: none; padding: 10px 14px; color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 9px 12px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.35), rgba(0, 0, 0, 0));
 }
-.agnes__lightboxBar .agnes__button {
-  border-color: rgba(255, 255, 255, 0.32); color: #fff; background: transparent;
+.agnes__lightboxMeta { display: flex; flex-direction: column; gap: 0; min-width: 0; margin-right: auto; }
+.agnes__lightboxTitle {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 52ch;
 }
-.agnes__lightboxBar .agnes__button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
-.agnes__lightboxBar .agnes__button:focus-visible { outline-color: #fff; }
-.agnes__lightboxBar .agnes__button--ghost { opacity: 0.85; }
-.agnes__lightboxBar .agnes__button--ghost:hover:not(:disabled) { opacity: 1; }
+.agnes__lightboxSub {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Grouped controls read as one instrument cluster instead of five loose
+   buttons floating in the corner. */
+.agnes__lightboxGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+  padding: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(10px);
+}
+.agnes__lightboxBtn {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.86);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.agnes__lightboxBtn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.16); color: #fff; }
+.agnes__lightboxBtn:disabled { opacity: 0.35; cursor: not-allowed; }
+.agnes__lightboxBtn:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
 
 .agnes__lightboxZoom {
-  min-width: 46px; text-align: right;
-  font-size: 11px; font-variant-numeric: tabular-nums;
-  opacity: 0.78; letter-spacing: 0.02em;
+  min-width: 40px;
+  padding: 0 5px;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.82);
 }
 
+.agnes__lightboxSave {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px;
+  flex: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.agnes__lightboxSave:hover { background: rgba(255, 255, 255, 0.18); border-color: rgba(255, 255, 255, 0.3); }
+.agnes__lightboxSave:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
 .agnes__lightboxStage {
-  flex: 1; min-height: 0;
-  display: grid; place-items: center;
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
   overflow: hidden;
   cursor: zoom-in;
   touch-action: none;
@@ -247,28 +1102,90 @@ select.agnes__field { cursor: pointer; }
 
 .agnes__lightboxImage {
   display: block;
-  max-width: 92vw; max-height: 82vh;
+  max-width: calc(100vw - 128px);
+  max-height: calc(100vh - 128px);
   object-fit: contain;
-  user-select: none; -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-select: none;
   -webkit-user-drag: none;
   touch-action: none;
   transform-origin: center center;
   will-change: transform;
-  transition: transform 140ms ease-out;
+  transition: transform 150ms ease-out;
+  border-radius: 2px;
+  box-shadow: 0 24px 70px -20px rgba(0, 0, 0, 0.8);
   cursor: inherit;
 }
 /* While a pointer drag is live the transform is written every frame, so a
    transition would make the picture lag the cursor. */
 .agnes__lightboxImage[data-dragging="true"] { transition: none; }
 
-.agnes__lightboxHint {
-  flex: none; padding: 0 14px 12px; text-align: center;
-  font-size: 11px; color: #fff; opacity: 0.6;
+/* Previous/next float over the stage edges: they are navigation between
+   records, not part of the picture, so they must not shift its centring. */
+.agnes__lightboxNav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 56px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 12px;
+  background: rgba(14, 17, 24, 0.5);
+  color: #fff;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  opacity: 0.75;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.agnes__lightboxNav:hover { opacity: 1; background: rgba(14, 17, 24, 0.72); }
+.agnes__lightboxNav:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.agnes__lightboxNav--prev { left: 14px; }
+.agnes__lightboxNav--next { right: 14px; }
+
+.agnes__lightboxFoot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: none;
+  padding: 6px 14px 11px;
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.agnes__lightboxHint { display: inline-flex; align-items: center; gap: 5px; }
+.agnes__lightboxKbd {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 4px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  font-family: var(--dsw-font-markdown-code-font-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.72);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .agnes__lightbox { animation: none; }
   .agnes__lightboxImage { transition: none; }
+  .agnes__thumb { transition: none; }
+  .agnes__card { transition: none; }
+  .agnes__card:hover { transform: none; }
+  .agnes__busyBar { animation-duration: 3.2s; }
+  .agnes__spinner { animation-duration: 2.4s; }
+  .agnes__status--loading .agnes__statusDot { animation: none; opacity: 0.6; }
+}
+
+@media (max-width: 620px) {
+  .agnes { padding: 14px 13px 18px; }
+  .agnes__row { grid-template-columns: 1fr; }
+  .agnes__grid { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 10px; }
+  .agnes__lightboxTitle { max-width: 24ch; }
+  .agnes__lightboxNav { width: 34px; height: 46px; }
 }
 `
 

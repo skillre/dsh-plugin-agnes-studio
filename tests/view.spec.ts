@@ -160,14 +160,44 @@ describe('studio panel', () => {
   it('switches to the video form and narrows the resolution list with the model', async () => {
     renderPanel()
     fireEvent.click(await screen.findByRole('tab', { name: translate('tab.video') }))
-    const sizeSelect = (await screen.findByLabelText(translate('form.size'))) as HTMLSelectElement
-    // The default video model accepts four tiers.
-    expect(Array.from(sizeSelect.options).map((option) => option.value)).toEqual(['720P', '1080P', '1K', '2K'])
+
+    /** The resolution chips currently offered, in order. */
+    const sizeValues = (): string[] => {
+      const group = screen.getByRole('radiogroup', { name: translate('form.size') })
+      return [...group.querySelectorAll('[role="radio"]')].map((node) => String(node.textContent))
+    }
+
+    // The default video model accepts four tiers, each rendered as its own chip
+    // so the alternatives are visible instead of hidden in a popup.
+    expect(sizeValues()).toEqual(['720P', '1080P', '1K', '2K'])
 
     // The Flash model is 720P only, so the control must collapse to one option.
     fireEvent.change(screen.getByLabelText(translate('form.model')), { target: { value: 'agnes-video-2.5-flash' } })
-    const narrowed = (await screen.findByLabelText(translate('form.size'))) as HTMLSelectElement
-    expect(Array.from(narrowed.options).map((option) => option.value)).toEqual(['720P'])
+    await waitFor(() => expect(sizeValues()).toEqual(['720P']))
+  })
+
+  it('explains the selected model and the expected output size', async () => {
+    renderPanel()
+    // The model's own `note` is the reason a control narrowed, so it is shown
+    // rather than left to be discovered by trying a value the API refuses.
+    expect(await screen.findByText(/复杂构图/)).toBeTruthy()
+    expect(screen.getByText(translate('hint.dimensions', { width: 1024, height: 1024 }))).toBeTruthy()
+  })
+
+  it('picks the control shape from the option count', async () => {
+    renderPanel()
+    // Four image tiers: a segmented control, because every alternative should
+    // stay on screen.
+    expect(screen.getByRole('radiogroup', { name: translate('form.size') }).className).toBe('agnes__seg')
+    // Eight ratios: chips, because eight segments would shrink the labels.
+    expect(screen.getByRole('radiogroup', { name: translate('form.ratio') }).className).toBe('agnes__chips')
+  })
+
+  it('fills the prompt from an example chip', async () => {
+    renderPanel()
+    const example = await screen.findByText(translate('example.image.1'))
+    fireEvent.click(example)
+    expect((screen.getByLabelText(translate('form.prompt')) as HTMLTextAreaElement).value).toBe(translate('example.image.1'))
   })
 
   it('refuses an empty prompt without calling the Host', async () => {
@@ -200,9 +230,43 @@ describe('studio panel', () => {
     const video: Generation = { ...image, id: 'v1', kind: 'video', prompt: 'a video record', asset: { src: '/x.mp4', mediaType: 'video/mp4', bytes: 1 } }
     renderPanel({ generations: [image, video] })
     await screen.findByText('an image record')
-    fireEvent.click(screen.getByRole('button', { name: `${translate('gallery.images')} 1` }))
+    // The filters are a tablist, so they are reachable as tabs and announce
+    // which one is selected.
+    const imageTab = screen.getAllByRole('tab', { name: `${translate('gallery.images')} 1` })[0]
+    fireEvent.click(imageTab as Element)
     expect(await screen.findByText('an image record')).toBeTruthy()
     expect(screen.queryByText('a video record')).toBeNull()
+    expect(imageTab?.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('shows a skeleton card while a request is in flight', async () => {
+    // A slow video used to show one line of text above the gallery, which reads
+    // as "nothing happened". The grid now reserves the slot the result fills.
+    let release: (() => void) | undefined
+    const { api } = fakeApi()
+    const slow: ClientApi = {
+      ...api,
+      generate: async (request) => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return { state: { ...(await api.state()), generations: [] }, created: {} as Generation }
+      },
+    }
+    render(
+      createElement(StudioPage, {
+        api: slow,
+        locale: { getSnapshot: () => ({ active: 'zh', locales: [], revision: 0 }), subscribe: () => () => undefined, register: () => () => undefined, bind: () => translate },
+        t: translate,
+      }),
+    )
+    fireEvent.change(await screen.findByLabelText(translate('form.prompt')), { target: { value: 'a slow one' } })
+    fireEvent.click(screen.getByRole('button', { name: translate('form.submitImage') }))
+    await waitFor(() => expect(document.querySelector('.agnes__card--pending')).not.toBeNull())
+    // The submit is disabled while it runs, so a double click cannot double the cost.
+    expect((screen.getByRole('button', { name: translate('form.submitImage') }) as HTMLButtonElement).disabled).toBe(true)
+    release?.()
+    await waitFor(() => expect(document.querySelector('.agnes__card--pending')).toBeNull())
   })
 })
 
@@ -347,6 +411,75 @@ describe('image viewer', () => {
     await waitFor(() => expect(document.querySelector('.agnes__lightbox')).toBeNull())
     expect(remove.mock.calls.some((call) => call[0] === 'keydown')).toBe(true)
     remove.mockRestore()
+  })
+
+  it('steps between pictures with the arrows and the arrow keys', async () => {
+    // A gallery is browsed. Making the user close and re-open per picture turns
+    // comparison into a chore, so the viewer owns the sequence.
+    const first = imageGeneration({ id: 'n1', prompt: 'first picture', asset: { src: '/n1.png', mediaType: 'image/png', bytes: 1, width: 96, height: 96 } })
+    const second = imageGeneration({ id: 'n2', prompt: 'second picture', asset: { src: '/n2.png', mediaType: 'image/png', bytes: 1, width: 96, height: 96 } })
+    renderPanel({ generations: [first, second] })
+    await screen.findByText('first picture')
+    fireEvent.click(document.querySelectorAll('.agnes__open')[0] as Element)
+    await screen.findByRole('dialog')
+    expect(document.querySelector('.agnes__lightboxImage')?.getAttribute('src')).toBe('/n1.png')
+
+    fireEvent.click(document.querySelector('.agnes__lightboxNav--next') as Element)
+    await waitFor(() => expect(document.querySelector('.agnes__lightboxImage')?.getAttribute('src')).toBe('/n2.png'))
+
+    // Wrapping: next from the last picture returns to the first.
+    fireEvent.click(document.querySelector('.agnes__lightboxNav--next') as Element)
+    await waitFor(() => expect(document.querySelector('.agnes__lightboxImage')?.getAttribute('src')).toBe('/n1.png'))
+
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    await waitFor(() => expect(document.querySelector('.agnes__lightboxImage')?.getAttribute('src')).toBe('/n2.png'))
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    await waitFor(() => expect(document.querySelector('.agnes__lightboxImage')?.getAttribute('src')).toBe('/n1.png'))
+
+    // The counter says where in the sequence the picture sits.
+    expect(document.querySelector('.agnes__lightboxSub')?.textContent).toContain(
+      translate('gallery.position', { index: 1, total: 2 }),
+    )
+  })
+
+  it('offers no navigation controls for a single picture', async () => {
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    fireEvent.click(document.querySelector('.agnes__open') as Element)
+    await screen.findByRole('dialog')
+    // One picture means no prev/next: a disabled pair of arrows on a lone image
+    // reads as a broken control rather than as "there is nothing to step to".
+    expect(document.querySelector('.agnes__lightboxNav--prev')).toBeNull()
+    expect(document.querySelector('.agnes__lightboxNav--next')).toBeNull()
+    expect(document.querySelector('.agnes__lightboxSub')?.textContent).not.toContain(translate('gallery.position', { index: 1, total: 1 }))
+  })
+
+  it('resets the zoom when stepping to another picture', async () => {
+    // Carrying a 400% pan onto the next picture would show it cropped to a
+    // corner of the previous one.
+    const first = imageGeneration({ id: 'z1', prompt: 'zoomed source', asset: { src: '/z1.png', mediaType: 'image/png', bytes: 1 } })
+    const second = imageGeneration({ id: 'z2', prompt: 'fresh target', asset: { src: '/z2.png', mediaType: 'image/png', bytes: 1 } })
+    renderPanel({ generations: [first, second] })
+    await screen.findByText('zoomed source')
+    fireEvent.click(document.querySelectorAll('.agnes__open')[0] as Element)
+    await screen.findByRole('dialog')
+    fireEvent.click(document.querySelector('.agnes__lightboxZoomIn') as Element)
+    expect(zoomPercent()).toBeGreaterThan(100)
+
+    fireEvent.click(document.querySelector('.agnes__lightboxNav--next') as Element)
+    await waitFor(() => expect(zoomPercent()).toBe(100))
+  })
+
+  it('returns focus to the control that opened it', async () => {
+    renderPanel({ generations: [imageGeneration()] })
+    await screen.findByText('a viewer fixture')
+    const opener = document.querySelector('.agnes__open') as HTMLElement
+    opener.focus()
+    fireEvent.click(opener)
+    await screen.findByRole('dialog')
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(document.querySelector('.agnes__lightbox')).toBeNull())
+    expect(document.activeElement).toBe(opener)
   })
 
   it('stays open across a Host state refresh', async () => {

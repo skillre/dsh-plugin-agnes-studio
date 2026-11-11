@@ -132,3 +132,43 @@ export async function seedImageGeneration(dataDir, options = {}) {
   await writeFile(join(dataDir, 'index.json'), JSON.stringify({ version: 1, generations: [generation] }), 'utf8')
   return generation
 }
+
+/** The second image id, used by the viewer-navigation checks. */
+export const SECOND_FIXTURE_ID = '8c41d7a2-5e3b-4f19-a872-6b0d9c4e1f57'
+
+/**
+ * Seed two finished images, so the viewer's prev/next navigation is reachable.
+ *
+ * One picture cannot exercise a sequence: with a single record the panel
+ * deliberately renders no arrows at all. The second record also carries a
+ * different aspect ratio and prompt so a navigation bug (showing the wrong
+ * picture, or keeping the previous zoom) is visible rather than plausible.
+ */
+export async function seedTwoImageGenerations(dataDir, options = {}) {
+  const { size = 512 } = options
+  const first = await seedImageGeneration(dataDir, options)
+  const mediaDir = join(dataDir, 'media')
+  const png = fixturePng(size)
+  await writeFile(join(mediaDir, `${SECOND_FIXTURE_ID}.png`), png)
+  const second = {
+    ...first,
+    id: SECOND_FIXTURE_ID,
+    prompt: '灯箱验收用图二：另一张，用于切换',
+    createdAt: new Date('2026-11-11T00:00:20.000Z').toISOString(),
+    finishedAt: new Date('2026-11-11T00:00:31.000Z').toISOString(),
+    durationMs: 11_000,
+    asset: {
+      ...first.asset,
+      src: `/api/agnes-studio/media?id=${encodeURIComponent(SECOND_FIXTURE_ID)}`,
+      bytes: png.length,
+      width: size,
+      height: size,
+    },
+  }
+  await writeFile(
+    join(dataDir, 'index.json'),
+    JSON.stringify({ version: 1, generations: [second, first] }),
+    'utf8',
+  )
+  return { first, second }
+}

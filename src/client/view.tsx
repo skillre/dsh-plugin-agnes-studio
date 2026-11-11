@@ -1,5 +1,5 @@
 /**
- * The Agnes Studio panel: a generation form on top, the result gallery below.
+ * The Agnes Studio panel: a composer on the left, the result gallery on the right.
  *
  * State rules: the Host owns the generations and the configuration; this page
  * holds only view state (which capability tab, the form draft, the in-flight
@@ -7,17 +7,23 @@
  * the returned state replaces the local one, so two windows on the same panel
  * converge instead of fighting over local copies.
  *
- * Three decisions worth knowing:
+ * Four decisions worth knowing:
  * 1. **The parameter controls are derived from the model table, not hard-coded.**
  *    Picking the Flash video model narrows the resolution list to 720P, because
  *    the table says so and the Host would refuse anything else. The UI can
- *    therefore never offer a value the API rejects.
+ *    therefore never offer a value the API rejects. The selected model's own
+ *    `note` is shown beneath the controls so the narrowing is explained rather
+ *    than surprising.
  * 2. **The submit is disabled while a request runs.** Image generation takes
  *    tens of seconds and video takes minutes; a double submit would silently
  *    double the cost and the queue depth.
  * 3. **A failure is shown in place with its retry affordance.** The Host marks a
  *    queue-full or a timeout as retryable, so the panel offers "retry" instead of
  *    making the user retype the prompt.
+ * 4. **Option sets pick their own control shape.** Two to four mutually
+ *    exclusive values become a segmented control; larger sets become chips. A
+ *    `<select>` hides every alternative behind a popup, which is the wrong shape
+ *    for a 4-way resolution choice whose whole point is that the choices differ.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -43,6 +49,7 @@ import {
   type ImageSize,
   type MediaKind,
   type MediaReference,
+  type ModelSpec,
   type StudioState,
   type VideoMode,
   type VideoRatio,
@@ -53,18 +60,23 @@ import {
 /** Keys this file translates; mirrored in `text.ts`. */
 // nav, title, subtitle, tab.image, tab.video, config.title, config.body,
 // config.source.credential, config.source.environment, config.source.none,
-// config.models, form.prompt, form.promptPlaceholder, form.model, form.size,
+// config.models, status.ready, status.notConfigured, status.loading,
+// status.source.credential, status.source.environment, status.source.none,
+// status.models, form.prompt, form.promptPlaceholder, form.model, form.size,
 // form.ratio, form.mode, form.seconds, form.seed, form.seedPlaceholder,
 // form.references, form.referencePlaceholder, form.addReference,
 // form.removeReference, form.firstFrame, form.lastFrame, form.submitImage,
 // form.submitVideo, form.needPrompt, form.needKeyframe, form.needReference,
+// form.examples, example.image.1, example.image.2, example.image.3,
+// example.video.1, example.video.2, example.video.3,
 // mode.text, mode.keyframe, mode.reference, status.generatingImage,
 // status.generatingVideo, status.failed, gallery.title, gallery.count,
-// gallery.empty, gallery.emptyFiltered, gallery.all, gallery.images,
-// gallery.videos, gallery.delete, gallery.clear, gallery.confirmClear,
-// gallery.confirmDelete, gallery.retry, gallery.download, gallery.open,
-// gallery.viewer, gallery.close, gallery.zoomIn, gallery.zoomOut,
-// gallery.resetZoom, gallery.hint,
+// gallery.empty, gallery.emptyHint, gallery.emptyFiltered,
+// gallery.emptyFilteredHint, gallery.all, gallery.images, gallery.videos,
+// gallery.delete, gallery.clear, gallery.confirmClear, gallery.confirmDelete,
+// gallery.retry, gallery.download, gallery.open, gallery.viewer, gallery.close,
+// gallery.zoomIn, gallery.zoomOut, gallery.resetZoom, gallery.hint,
+// gallery.hintNav, gallery.prev, gallery.next, gallery.position,
 // gallery.took, gallery.loading, gallery.loadFailed, error.retryable,
 // error.not-configured, error.queue-full, error.timeout, error.unauthorized,
 // error.rate-limited, error.cancelled, error.unknown, action.dismiss,
@@ -140,6 +152,34 @@ function initialVideoDraft(): VideoDraft {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Icons
+//
+// Inline strokes rather than an icon dependency: the browser bundle's module
+// envelope can only resolve `react`, so a package import would break loading.
+// Every icon is 1.7px stroke at 24 viewBox so the set looks drawn by one hand.
+// ---------------------------------------------------------------------------
+
+/** A stroke-icon wrapper; `size` is the rendered square in px. */
+function Glyph({ size = 16, children }: { readonly size?: number; readonly children: ReactNode }): JSX.Element {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {children}
+    </svg>
+  )
+}
+
 /** The sidebar entry icon: a frame with a spark and film perforations. */
 export function SidebarGlyph({ size = 'md' }: SidebarEntryProps): JSX.Element {
   const dimension = size === 'sm' ? 18 : 20
@@ -163,6 +203,135 @@ export function SidebarGlyph({ size = 'md' }: SidebarEntryProps): JSX.Element {
     </svg>
   )
 }
+
+/** The panel's own mark: a four-point spark inside a rounded frame. */
+function BrandGlyph(): JSX.Element {
+  return (
+    <Glyph size={19}>
+      <path d="M12 3.2 13.7 8.3 18.8 10 13.7 11.7 12 16.8 10.3 11.7 5.2 10 10.3 8.3Z" fill="currentColor" stroke="none" />
+      <path d="M18.4 15.2 19.2 17.4 21.4 18.2 19.2 19 18.4 21.2 17.6 19 15.4 18.2 17.6 17.4Z" fill="currentColor" stroke="none" opacity="0.72" />
+    </Glyph>
+  )
+}
+
+const IconImage = (): JSX.Element => (
+  <Glyph size={14}>
+    <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+    <path d="M4.5 15.5 9 11l3 3 2.5-2.5 5 4.5" />
+    <circle cx="15.5" cy="8.5" r="1.3" />
+  </Glyph>
+)
+
+const IconVideo = (): JSX.Element => (
+  <Glyph size={14}>
+    <rect x="2.5" y="5.5" width="13" height="13" rx="2.5" />
+    <path d="M15.5 10.4 21 7.4v9.2l-5.5-3" />
+  </Glyph>
+)
+
+const IconChevron = (): JSX.Element => (
+  <Glyph size={13}>
+    <path d="m6 9.5 6 6 6-6" />
+  </Glyph>
+)
+
+const IconPlus = (): JSX.Element => (
+  <Glyph size={12}>
+    <path d="M12 5v14M5 12h14" />
+  </Glyph>
+)
+
+const IconTrash = (): JSX.Element => (
+  <Glyph size={14}>
+    <path d="M4 7h16M9.5 7V4.8h5V7M6.5 7l.8 12.2h9.4L17.5 7" />
+    <path d="M10.5 10.8v5.4M13.5 10.8v5.4" />
+  </Glyph>
+)
+
+const IconDownload = (): JSX.Element => (
+  <Glyph size={14}>
+    <path d="M12 3.8v10.4M8 10.4 12 14.4l4-4" />
+    <path d="M4.5 16.5v2.2a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-2.2" />
+  </Glyph>
+)
+
+const IconClose = (): JSX.Element => (
+  <Glyph size={15}>
+    <path d="M6 6l12 12M18 6 6 18" />
+  </Glyph>
+)
+
+const IconExpand = (): JSX.Element => (
+  <Glyph size={13}>
+    <path d="M9.5 4.5H4.5v5M14.5 4.5h5v5M9.5 19.5H4.5v-5M14.5 19.5h5v-5" />
+  </Glyph>
+)
+
+const IconZoomIn = (): JSX.Element => (
+  <Glyph size={15}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <path d="M7.4 10.5h6.2M10.5 7.4v6.2M16.2 16.2 21 21" />
+  </Glyph>
+)
+
+const IconZoomOut = (): JSX.Element => (
+  <Glyph size={15}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <path d="M7.4 10.5h6.2M16.2 16.2 21 21" />
+  </Glyph>
+)
+
+const IconReset = (): JSX.Element => (
+  <Glyph size={15}>
+    <path d="M4 9.5h5V4.5" />
+    <path d="M4.6 9.2a8 8 0 1 1-1.1 5.3" />
+  </Glyph>
+)
+
+const IconAlert = (): JSX.Element => (
+  <Glyph size={15}>
+    <path d="M12 4.2 21 19.4H3Z" />
+    <path d="M12 9.6v4.2M12 16.6v.1" />
+  </Glyph>
+)
+
+const IconInfo = (): JSX.Element => (
+  <Glyph size={15}>
+    <circle cx="12" cy="12" r="8.4" />
+    <path d="M12 11v5.4M12 7.9v.1" />
+  </Glyph>
+)
+
+const IconSpark = (): JSX.Element => (
+  <Glyph size={14}>
+    <path d="M12 3.6 13.8 8.9 19.1 10.7 13.8 12.5 12 17.8 10.2 12.5 4.9 10.7 10.2 8.9Z" />
+    <path d="M18.2 15.6l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7Z" />
+  </Glyph>
+)
+
+const IconArrowLeft = (): JSX.Element => (
+  <Glyph size={17}>
+    <path d="M14.5 5.5 8 12l6.5 6.5" />
+  </Glyph>
+)
+
+const IconArrowRight = (): JSX.Element => (
+  <Glyph size={17}>
+    <path d="M9.5 5.5 16 12l-6.5 6.5" />
+  </Glyph>
+)
+
+const IconFrame = (): JSX.Element => (
+  <Glyph size={20}>
+    <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+    <path d="M4.5 15.5 9 11l3 3 2.5-2.5 5 4.5" />
+    <circle cx="15.5" cy="8.5" r="1.3" />
+  </Glyph>
+)
+
+// ---------------------------------------------------------------------------
+// Text helpers
+// ---------------------------------------------------------------------------
 
 /** Read one message for a Host failure code, falling back to the raw message. */
 function messageFor(t: Translate, error: unknown): string {
@@ -220,49 +389,215 @@ function formatSeconds(durationMs: number | undefined): string {
   return (durationMs / 1000).toFixed(1)
 }
 
-/** A human summary of the parameters actually sent. */
-function paramSummary(generation: Generation): string {
+/** A human summary of the parameters actually sent, one entry per value. */
+function paramFacts(generation: Generation): string[] {
   const parts: string[] = []
   for (const [key, value] of Object.entries(generation.params)) {
     // `seed=0` is a legitimate value, so only empty and null are skipped.
     if (key === 'model' || value === null || value === '') continue
     parts.push(`${key}=${String(value)}`)
   }
-  return parts.join(' · ')
+  return parts
 }
 
 /** Resolve the expected pixel dimensions for a draft, when the table knows them. */
-function expectedDimensions(kind: MediaKind, size: string, ratio: string): string | undefined {
+function expectedDimensions(kind: MediaKind, size: string, ratio: string): readonly [number, number] | undefined {
   const table = kind === 'image' ? IMAGE_DIMENSIONS_REF : VIDEO_DIMENSIONS_REF
   const row = table[ratio as keyof typeof table] as Record<string, readonly [number, number]> | undefined
-  const pair = row?.[size]
-  return pair === undefined ? undefined : `${pair[0]}×${pair[1]}`
+  return row?.[size]
 }
 
-/** One select control with a label. */
-function Field(props: {
+/** The width/height of an aspect-ratio label, e.g. `16:9` → `[16, 9]`. */
+function ratioParts(ratio: string): readonly [number, number] {
+  const parts = ratio.split(':').map((part) => Number(part))
+  const width = parts[0]
+  const height = parts[1]
+  if (width === undefined || height === undefined) return [1, 1]
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return [1, 1]
+  return [width, height]
+}
+
+/** A tiny proportional box drawn from a ratio label, sized to fit `box` px. */
+function RatioGlyph({ ratio, box = 15 }: { readonly ratio: string; readonly box?: number }): JSX.Element {
+  const [width, height] = ratioParts(ratio)
+  const scale = box / Math.max(width, height)
+  return (
+    <span
+      className="agnes__ratioGlyph"
+      aria-hidden="true"
+      style={{ width: `${String(Math.max(6, Math.round(width * scale)))}px`, height: `${String(Math.max(6, Math.round(height * scale)))}px` }}
+    />
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
+
+/** One option for a segmented control or a chip row. */
+interface Option<T extends string> {
+  readonly value: T
+  readonly label: string
+}
+
+/**
+ * A segmented single-choice control.
+ *
+ * Used for two to four mutually exclusive values where the alternatives should
+ * stay visible. Every option is a real `<button>` inside a `radiogroup`, so
+ * keyboard users get arrow-free tabbing and screen readers announce the state.
+ */
+function Segmented<T extends string>(props: {
+  t: Translate
+  label: string
+  value: T
+  options: readonly Option<T>[]
+  disabled: boolean
+  onChange: (value: T) => void
+}): JSX.Element {
+  const { t, label, value, options, disabled, onChange } = props
+  return (
+    <div className="agnes__label">
+      <span>{label}</span>
+      <div className="agnes__seg" role="radiogroup" aria-label={label}>
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={option.value === value}
+            className={option.value === value ? 'agnes__segBtn agnes__segBtn--on' : 'agnes__segBtn'}
+            disabled={disabled}
+            onClick={() => onChange(option.value)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      <span className="agnes__srOnly">{t('gallery.title')}</span>
+    </div>
+  )
+}
+
+/**
+ * A chip row for larger option sets.
+ *
+ * Eight aspect ratios or nine durations do not fit a segmented control without
+ * shrinking the labels past legibility, so each value becomes a pill. A ratio
+ * pill also draws itself, which is faster to scan than reading "21:9".
+ */
+function Chips<T extends string>(props: {
+  label: string
+  value: T
+  options: readonly Option<T>[]
+  disabled: boolean
+  showRatio: boolean
+  onChange: (value: T) => void
+}): JSX.Element {
+  const { label, value, options, disabled, showRatio, onChange } = props
+  return (
+    <div className="agnes__label">
+      <span>{label}</span>
+      <div className="agnes__chips" role="radiogroup" aria-label={label}>
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={option.value === value}
+            className={option.value === value ? 'agnes__chip agnes__chip--on' : 'agnes__chip'}
+            disabled={disabled}
+            onClick={() => onChange(option.value)}
+          >
+            {showRatio ? <RatioGlyph ratio={option.value} /> : null}
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** One `<select>` with its own chevron; `appearance: none` removes the native one. */
+function SelectField(props: {
   label: string
   value: string
-  options: readonly { readonly value: string; readonly label: string }[]
+  options: readonly Option<string>[]
+  disabled: boolean
   onChange: (value: string) => void
-  disabled?: boolean
 }): JSX.Element {
+  const { label, value, options, disabled, onChange } = props
   return (
     <label className="agnes__label">
-      {props.label}
-      <select
-        className="agnes__field"
-        value={props.value}
-        disabled={props.disabled === true}
-        onChange={(event) => props.onChange(event.target.value)}
-      >
-        {props.options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
+      {label}
+      <span className="agnes__selectWrap">
+        <select
+          className="agnes__field"
+          value={value}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <span className="agnes__chevron">
+          <IconChevron />
+        </span>
+      </span>
     </label>
+  )
+}
+
+/** The prompt field with its own footer: character count and example chips. */
+function PromptBox(props: {
+  t: Translate
+  value: string
+  disabled: boolean
+  examples: readonly string[]
+  onChange: (value: string) => void
+}): JSX.Element {
+  const { t, value, disabled, examples, onChange } = props
+  const nearLimit = value.length > LIMITS.prompt * 0.9
+  return (
+    <div className="agnes__form">
+      <div className="agnes__label">
+        <span>{t('form.prompt')}</span>
+        <div className="agnes__promptBox">
+          <textarea
+            className="agnes__prompt"
+            value={value}
+            maxLength={LIMITS.prompt}
+            disabled={disabled}
+            aria-label={t('form.prompt')}
+            placeholder={t('form.promptPlaceholder')}
+            onChange={(event) => onChange(event.target.value)}
+          />
+          <div className="agnes__promptFoot">
+            <span className="agnes__counter" data-near={nearLimit ? 'true' : 'false'} style={nearLimit ? { color: 'var(--a-warn)' } : undefined}>
+              {value.length} / {LIMITS.prompt}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="agnes__examples">
+        <span className="agnes__hint">{t('form.examples')}</span>
+        {examples.map((example, index) => (
+          <button
+            key={index}
+            type="button"
+            className="agnes__example"
+            disabled={disabled}
+            title={example}
+            onClick={() => onChange(example)}
+          >
+            {example.length > 26 ? `${example.slice(0, 26)}…` : example}
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -271,9 +606,10 @@ function ReferenceList(props: {
   t: Translate
   urls: string[]
   disabled: boolean
+  max: number
   onChange: (urls: string[]) => void
 }): JSX.Element {
-  const { t, urls, disabled, onChange } = props
+  const { t, urls, disabled, max, onChange } = props
   return (
     <div className="agnes__refs">
       <span className="agnes__label">
@@ -285,6 +621,7 @@ function ReferenceList(props: {
               type="url"
               value={url}
               disabled={disabled}
+              aria-label={`${t('form.references')} ${String(index + 1)}`}
               placeholder={t('form.referencePlaceholder')}
               onChange={(event) => {
                 const next = [...urls]
@@ -294,26 +631,33 @@ function ReferenceList(props: {
             />
             <button
               type="button"
-              className="agnes__button agnes__button--ghost"
+              className="agnes__iconBtn agnes__iconBtn--danger"
               disabled={disabled}
+              aria-label={t('form.removeReference')}
+              title={t('form.removeReference')}
               onClick={() => onChange(urls.filter((_entry, position) => position !== index))}
             >
-              {t('form.removeReference')}
+              <IconTrash />
             </button>
           </span>
         ))}
       </span>
       <button
         type="button"
-        className="agnes__button"
-        disabled={disabled || urls.length >= 8}
+        className="agnes__refAdd"
+        disabled={disabled || urls.length >= max}
         onClick={() => onChange([...urls, ''])}
       >
+        <IconPlus />
         {t('form.addReference')}
       </button>
     </div>
   )
 }
+
+// ---------------------------------------------------------------------------
+// Image viewer
+// ---------------------------------------------------------------------------
 
 /** Lowest zoom: the picture fits the stage. */
 const VIEWER_MIN_ZOOM = 1
@@ -342,26 +686,6 @@ function clampViewerZoom(value: number): number {
   return Math.min(VIEWER_MAX_ZOOM, Math.max(VIEWER_MIN_ZOOM, value))
 }
 
-/** A 16px stroke icon for the viewer controls; inherits the button's color. */
-function ViewerIcon({ children }: { readonly children: ReactNode }): JSX.Element {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.9"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-    >
-      {children}
-    </svg>
-  )
-}
-
 /**
  * The in-panel image viewer.
  *
@@ -374,14 +698,21 @@ function ViewerIcon({ children }: { readonly children: ReactNode }): JSX.Element
  * It renders in the component tree under a `position: fixed` overlay rather than
  * through a portal: the browser bundle's module envelope can only resolve
  * `react`, so importing `react-dom` would break module loading.
+ *
+ * Keyboard: Escape closes, arrows step between pictures, +/- zoom, 0 resets. The
+ * arrows matter more than they look — a gallery is browsed, and forcing a close
+ * and a re-open per picture makes a viewer useless for comparison.
  */
 function ImageViewer(props: {
   t: Translate
   generation: Generation
   asset: GenerationAsset
+  position: { readonly index: number; readonly total: number }
+  onPrev?: () => void
+  onNext?: () => void
   onClose: () => void
 }): JSX.Element {
-  const { t, generation, asset, onClose } = props
+  const { t, generation, asset, position, onPrev, onNext, onClose } = props
   const [view, setView] = useState<ViewerTransform>(VIEWER_IDENTITY)
   const [dragging, setDragging] = useState(false)
   const stageRef = useRef<HTMLDivElement | null>(null)
@@ -406,21 +737,6 @@ function ImageViewer(props: {
   useEffect(() => {
     closeRef.current?.focus()
   }, [])
-
-  // Escape closes from anywhere in the panel, not only while the stage has
-  // focus. The listener is removed on unmount, so closing leaves no global trace.
-  useEffect(() => {
-    if (typeof window === 'undefined') return undefined
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      onClose()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-    }
-  }, [onClose])
 
   /**
    * Scale about one screen point.
@@ -467,6 +783,57 @@ function ImageViewer(props: {
     },
     [zoomAt],
   )
+
+  // Keyboard shortcuts. Bound on the window rather than on the overlay so they
+  // work whatever holds focus, and removed on unmount so closing leaves no
+  // global trace.
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      switch (event.key) {
+        case 'Escape':
+          event.preventDefault()
+          onClose()
+          return
+        case 'ArrowLeft':
+          if (onPrev === undefined) return
+          event.preventDefault()
+          onPrev()
+          return
+        case 'ArrowRight':
+          if (onNext === undefined) return
+          event.preventDefault()
+          onNext()
+          return
+        case '+':
+        case '=':
+          event.preventDefault()
+          zoomFromButton(VIEWER_ZOOM_STEP)
+          return
+        case '-':
+        case '_':
+          event.preventDefault()
+          zoomFromButton(1 / VIEWER_ZOOM_STEP)
+          return
+        case '0':
+          event.preventDefault()
+          setView(VIEWER_IDENTITY)
+          return
+        default:
+          return
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [onClose, onNext, onPrev, zoomFromButton])
+
+  // A new picture starts fitted: carrying the previous zoom and pan across a
+  // navigation would show the next picture cropped to wherever the last one was.
+  useEffect(() => {
+    setView(VIEWER_IDENTITY)
+  }, [generation.id])
 
   // Wheel zoom is bound natively and non-passively: React's synthetic wheel
   // listener is passive at the root, so `preventDefault()` there is ignored and
@@ -551,6 +918,12 @@ function ImageViewer(props: {
   }
 
   const pannable = view.zoom > VIEWER_MIN_ZOOM
+  const facts = [
+    generation.model,
+    asset.width !== undefined && asset.height !== undefined ? `${String(asset.width)}×${String(asset.height)}` : undefined,
+    ...paramFacts(generation),
+    formatSeconds(generation.durationMs) === '' ? undefined : t('gallery.took', { seconds: formatSeconds(generation.durationMs) }),
+  ].filter((entry): entry is string => entry !== undefined && entry !== '')
 
   return (
     <div
@@ -561,51 +934,66 @@ function ImageViewer(props: {
       onClick={onBackdropClick}
     >
       <div className="agnes__lightboxBar">
-        <span className="agnes__lightboxZoom">{Math.round(view.zoom * 100)}%</span>
-        <button
-          type="button"
-          className="agnes__lightboxZoomOut"
-          aria-label={t('gallery.zoomOut')}
-          onClick={() => zoomFromButton(1 / VIEWER_ZOOM_STEP)}
-        >
-          <ViewerIcon>
-            <circle cx="10.5" cy="10.5" r="6.5" />
-            <path d="M7.4 10.5h6.2M16.2 16.2 21 21" />
-          </ViewerIcon>
-        </button>
-        <button
-          type="button"
-          className="agnes__lightboxZoomIn"
-          aria-label={t('gallery.zoomIn')}
-          onClick={() => zoomFromButton(VIEWER_ZOOM_STEP)}
-        >
-          <ViewerIcon>
-            <circle cx="10.5" cy="10.5" r="6.5" />
-            <path d="M7.4 10.5h6.2M10.5 7.4v6.2M16.2 16.2 21 21" />
-          </ViewerIcon>
-        </button>
-        <button
-          type="button"
-          className="agnes__lightboxReset"
-          aria-label={t('gallery.resetZoom')}
-          onClick={() => setView(VIEWER_IDENTITY)}
-        >
-          <ViewerIcon>
-            <path d="M4 9.5h5V4.5" />
-            <path d="M4.6 9.2a8 8 0 1 1-1.1 5.3" />
-          </ViewerIcon>
-        </button>
+        <span className="agnes__lightboxMeta">
+          <span className="agnes__lightboxTitle">{generation.prompt}</span>
+          <span className="agnes__lightboxSub">
+            {facts.join(' · ')}
+            {position.total > 1 ? ` · ${t('gallery.position', { index: position.index + 1, total: position.total })}` : ''}
+          </span>
+        </span>
+
+        <span className="agnes__lightboxGroup">
+          <button
+            type="button"
+            className="agnes__lightboxBtn agnes__lightboxZoomOut"
+            aria-label={t('gallery.zoomOut')}
+            title={t('gallery.zoomOut')}
+            disabled={view.zoom <= VIEWER_MIN_ZOOM}
+            onClick={() => zoomFromButton(1 / VIEWER_ZOOM_STEP)}
+          >
+            <IconZoomOut />
+          </button>
+          <span className="agnes__lightboxZoom">{Math.round(view.zoom * 100)}%</span>
+          <button
+            type="button"
+            className="agnes__lightboxBtn agnes__lightboxZoomIn"
+            aria-label={t('gallery.zoomIn')}
+            title={t('gallery.zoomIn')}
+            disabled={view.zoom >= VIEWER_MAX_ZOOM}
+            onClick={() => zoomFromButton(VIEWER_ZOOM_STEP)}
+          >
+            <IconZoomIn />
+          </button>
+          <button
+            type="button"
+            className="agnes__lightboxBtn agnes__lightboxReset"
+            aria-label={t('gallery.resetZoom')}
+            title={t('gallery.resetZoom')}
+            disabled={view.zoom === VIEWER_MIN_ZOOM && view.x === 0 && view.y === 0}
+            onClick={() => setView(VIEWER_IDENTITY)}
+          >
+            <IconReset />
+          </button>
+        </span>
+
         <a
-          className="agnes__button agnes__button--ghost"
+          className="agnes__lightboxSave"
           href={asset.src}
           download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
         >
+          <IconDownload />
           {t('gallery.download')}
         </a>
-        <button type="button" className="agnes__lightboxClose" aria-label={t('gallery.close')} ref={closeRef} onClick={onClose}>
-          <ViewerIcon>
-            <path d="M6 6l12 12M18 6 6 18" />
-          </ViewerIcon>
+
+        <button
+          type="button"
+          className="agnes__lightboxBtn agnes__lightboxClose"
+          aria-label={t('gallery.close')}
+          title={t('gallery.close')}
+          ref={closeRef}
+          onClick={onClose}
+        >
+          <IconClose />
         </button>
       </div>
 
@@ -614,6 +1002,11 @@ function ImageViewer(props: {
         ref={stageRef}
         data-panning={dragging}
       >
+        {onPrev === undefined ? null : (
+          <button type="button" className="agnes__lightboxNav agnes__lightboxNav--prev" aria-label={t('gallery.prev')} title={t('gallery.prev')} onClick={onPrev}>
+            <IconArrowLeft />
+          </button>
+        )}
         <img
           className="agnes__lightboxImage"
           ref={imageRef}
@@ -628,10 +1021,47 @@ function ImageViewer(props: {
           onPointerCancel={onPointerEnd}
           onClick={onImageClick}
         />
+        {onNext === undefined ? null : (
+          <button type="button" className="agnes__lightboxNav agnes__lightboxNav--next" aria-label={t('gallery.next')} title={t('gallery.next')} onClick={onNext}>
+            <IconArrowRight />
+          </button>
+        )}
       </div>
 
-      <span className="agnes__lightboxHint">{t('gallery.hint')}</span>
+      <div className="agnes__lightboxFoot">
+        <span className="agnes__lightboxHint">{t('gallery.hint')}</span>
+        {position.total > 1 ? (
+          <span className="agnes__lightboxHint">
+            <kbd className="agnes__lightboxKbd">←</kbd>
+            <kbd className="agnes__lightboxKbd">→</kbd>
+            {t('gallery.hintNav')}
+          </span>
+        ) : null}
+      </div>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Gallery
+// ---------------------------------------------------------------------------
+
+/** The placeholder card shown while a request runs, so the grid acknowledges it. */
+function PendingCard(props: { t: Translate; kind: MediaKind }): JSX.Element {
+  return (
+    <article className="agnes__card agnes__card--pending" aria-hidden="true">
+      <div className="agnes__thumbFrame">
+        <div className="agnes__pendingShine" />
+        <span className="agnes__pendingBadge">
+          <span className="agnes__spinner" />
+          {props.kind === 'image' ? props.t('status.generatingImage') : props.t('status.generatingVideo')}
+        </span>
+      </div>
+      <div className="agnes__cardBody">
+        <span className="agnes__pendingLine" style={{ width: '72%' }} />
+        <span className="agnes__pendingLine" style={{ width: '46%' }} />
+      </div>
+    </article>
   )
 }
 
@@ -641,7 +1071,7 @@ function GenerationCard(props: {
   generation: Generation
   onDelete: (id: string) => void
   onRetry: (generation: Generation) => void
-  onOpen: (generation: Generation) => void
+  onOpen: (generation: Generation, opener: Element | null) => void
   disabled: boolean
 }): JSX.Element {
   const { t, generation, onDelete, onRetry, onOpen, disabled } = props
@@ -649,28 +1079,51 @@ function GenerationCard(props: {
   const isImage = generation.kind === 'image'
   const failed = generation.status === 'failed'
   const took = formatSeconds(generation.durationMs)
+  const dimensions =
+    asset?.width !== undefined && asset?.height !== undefined ? `${String(asset.width)}×${String(asset.height)}` : undefined
+  const facts = [dimensions, took === '' ? undefined : t('gallery.took', { seconds: took }), ...paramFacts(generation)].filter(
+    (entry): entry is string => entry !== undefined && entry !== '',
+  )
+
   return (
     <article className={failed ? 'agnes__card agnes__card--failed' : 'agnes__card'}>
       {asset !== undefined && isImage ? (
         <button
           type="button"
           className="agnes__thumbButton"
-          onClick={() => onOpen(generation)}
-          aria-label={t('gallery.viewer')}
+          onClick={(event) => onOpen(generation, event.currentTarget)}
+          aria-label={`${t('gallery.viewer')}: ${generation.prompt.slice(0, 80)}`}
         >
           <img className="agnes__thumb" src={asset.src} alt={generation.prompt.slice(0, 160)} loading="lazy" />
+          <span className="agnes__thumbVeil">
+            <span className="agnes__thumbVeilInner">
+              <IconExpand />
+              {t('gallery.viewer')}
+            </span>
+          </span>
         </button>
       ) : asset !== undefined ? (
-        <video className="agnes__thumb" src={asset.src} controls preload="metadata" />
+        <div className="agnes__thumbFrame">
+          <video className="agnes__thumb agnes__thumb--contain" src={asset.src} controls preload="metadata" />
+        </div>
       ) : (
-        <div className="agnes__thumb" aria-hidden="true" />
+        <div className="agnes__thumbFrame">
+          <div className="agnes__thumbEmpty">
+            <IconAlert />
+          </div>
+        </div>
       )}
-      <div className="agnes__body">
-        <p className="agnes__prompt">{generation.prompt}</p>
+
+      <div className="agnes__cardBody">
+        <p className="agnes__promptText">{generation.prompt}</p>
         <div className="agnes__facts">
-          <span>{generation.model}</span>
-          {took === '' ? null : <span>{t('gallery.took', { seconds: took })}</span>}
-          <span>{paramSummary(generation)}</span>
+          <span className="agnes__fact">{generation.model}</span>
+          {facts.map((fact) => (
+            <span className="agnes__fact" key={fact}>
+              <span className="agnes__factDot" aria-hidden="true" />
+              {fact}
+            </span>
+          ))}
         </div>
         {failed ? (
           <>
@@ -683,39 +1136,50 @@ function GenerationCard(props: {
               video already has a player in the card, and the lightbox is an
               image viewer. */}
           {asset !== undefined && isImage ? (
-            <button type="button" className="agnes__open" onClick={() => onOpen(generation)}>
+            <button type="button" className="agnes__open" onClick={(event) => onOpen(generation, event.currentTarget)}>
+              <IconExpand />
               {t('gallery.open')}
             </button>
           ) : null}
           {asset !== undefined ? (
             <a
-              className="agnes__button agnes__button--ghost"
+              className="agnes__iconBtn"
               href={asset.src}
               download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
+              aria-label={t('gallery.download')}
+              title={t('gallery.download')}
             >
-              {t('gallery.download')}
+              <IconDownload />
             </a>
           ) : null}
           {failed && generation.retryable === true ? (
-            <button type="button" className="agnes__button" disabled={disabled} onClick={() => onRetry(generation)}>
+            <button type="button" className="agnes__open" disabled={disabled} onClick={() => onRetry(generation)}>
+              <IconReset />
               {t('gallery.retry')}
             </button>
           ) : null}
+          <span className="agnes__spacer" />
           <button
             type="button"
-            className="agnes__button agnes__button--danger"
+            className="agnes__iconBtn agnes__iconBtn--danger"
             disabled={disabled}
+            aria-label={t('gallery.delete')}
+            title={t('gallery.delete')}
             onClick={() => {
               if (confirmInBrowser(t('gallery.confirmDelete'))) onDelete(generation.id)
             }}
           >
-            {t('gallery.delete')}
+            <IconTrash />
           </button>
         </div>
       </div>
     </article>
   )
 }
+
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
 
 /** The studio page. */
 export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
@@ -739,6 +1203,8 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   const [viewingId, setViewingId] = useState<string | null>(null)
   // The last submitted request, so "retry" resends exactly what failed.
   const lastRequest = useRef<GenerationRequest | null>(null)
+  /** The element that opened the viewer, so closing can return focus to it. */
+  const openerRef = useRef<Element | null>(null)
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -869,7 +1335,8 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
     }
   }, [api, t])
 
-  /** The selected video model's spec, which narrows the size options. */
+  /** The selected models' specs, which narrow the available controls. */
+  const imageModel = useMemo(() => modelsFor('image').find((model) => model.id === imageDraft.model), [imageDraft.model])
   const videoModel = useMemo(() => modelsFor('video').find((model) => model.id === videoDraft.model), [videoDraft.model])
 
   /** Keep the video size legal when the model changes (Flash is 720P only). */
@@ -890,13 +1357,41 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   const videoCount = generations.length - imageCount
   const disabled = busy !== null
 
-  /** The record the viewer shows; resolving by id keeps it alive across refreshes. */
-  const viewing = useMemo(
-    () => (viewingId === null ? undefined : generations.find((generation) => generation.id === viewingId)),
-    [generations, viewingId],
+  /** The image records the viewer can step through, in gallery order. */
+  const viewable = useMemo(
+    () => generations.filter((generation) => generation.kind === 'image' && generation.asset !== undefined),
+    [generations],
   )
-  const closeViewer = useCallback(() => setViewingId(null), [])
-  const openViewer = useCallback((generation: Generation) => setViewingId(generation.id), [])
+  const viewingIndex = useMemo(
+    () => (viewingId === null ? -1 : viewable.findIndex((generation) => generation.id === viewingId)),
+    [viewable, viewingId],
+  )
+  const viewing = viewingIndex === -1 ? undefined : viewable[viewingIndex]
+  const closeViewer = useCallback(() => {
+    setViewingId(null)
+    // Return focus to the control that opened the viewer, so closing does not
+    // drop a keyboard user back at the top of the document.
+    //
+    // The opener is taken from the click event rather than from
+    // `document.activeElement`: a programmatic `.click()` (which is how the
+    // browser check and any automation drive this) does not move focus, so
+    // `activeElement` would be `<body>` and focus would be lost.
+    const opener = openerRef.current
+    openerRef.current = null
+    if (opener instanceof HTMLElement && typeof opener.focus === 'function') opener.focus()
+  }, [])
+  const openViewer = useCallback((generation: Generation, opener: Element | null) => {
+    openerRef.current = opener
+    setViewingId(generation.id)
+  }, [])
+  const stepViewer = useCallback(
+    (delta: number) => {
+      if (viewingIndex === -1 || viewable.length < 2) return
+      const next = viewable[(viewingIndex + delta + viewable.length) % viewable.length]
+      if (next !== undefined) setViewingId(next.id)
+    },
+    [viewable, viewingIndex],
+  )
 
   // A record can vanish under the viewer (deleted here, evicted by the history
   // cap, cleared from another window). Leaving the overlay up would show a
@@ -908,300 +1403,413 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   const imageDimension = expectedDimensions('image', imageDraft.size, imageDraft.ratio)
   const videoDimension = expectedDimensions('video', videoDraft.size, videoDraft.ratio)
 
+  const imageSizeOptions: Option<ImageSize>[] = IMAGE_SIZES.map((size) => ({ value: size, label: size }))
+  const imageRatioOptions: Option<ImageRatio>[] = IMAGE_RATIOS.map((ratio) => ({ value: ratio, label: ratio }))
+  const videoSizeOptions: Option<VideoSize>[] = ((videoModel?.sizes ?? ['720P']) as readonly VideoSize[]).map((size) => ({ value: size, label: size }))
+  const videoRatioOptions: Option<VideoRatio>[] = VIDEO_RATIOS.map((ratio) => ({ value: ratio, label: ratio }))
+  const videoSecondsOptions: Option<string>[] = VIDEO_SECONDS.map((seconds) => ({ value: String(seconds), label: `${String(seconds)}s` }))
+  const videoModeOptions: Option<VideoMode>[] = ((videoModel?.modes ?? ['text']) as readonly VideoMode[]).map((mode) => ({
+    value: mode,
+    label: t(`mode.${mode}`),
+  }))
+
+  /** The status pill: configuration state in one glance, detail on hover. */
+  const status: { text: string; title: string; tone: 'ok' | 'off' | 'loading' } =
+    state === null
+      ? { text: t('status.loading'), title: t('status.loading'), tone: 'loading' }
+      : state.configured
+        ? {
+            text: `${t('status.ready')}${state.upstreamModels.length > 0 ? ` · ${t('status.models', { count: state.upstreamModels.length })}` : ''}`,
+            title:
+              state.keySource === 'credential'
+                ? t('config.source.credential')
+                : state.keySource === 'environment'
+                  ? t('config.source.environment')
+                  : t('config.source.none'),
+            tone: 'ok',
+          }
+        : { text: t('status.notConfigured'), title: t('config.body'), tone: 'off' }
+
+  const examples = tab === 'image' ? [t('example.image.1'), t('example.image.2'), t('example.image.3')] : [t('example.video.1'), t('example.video.2'), t('example.video.3')]
+
   return (
     <div className="agnes">
       <StudioStyles />
-      <header className="agnes__head">
-        <h1 className="agnes__title">{t('title')}</h1>
-        <p className="agnes__subtitle">{t('subtitle')}</p>
+
+      <header className="agnes__header">
+        <span className="agnes__brandMark" aria-hidden="true">
+          <BrandGlyph />
+        </span>
+        <span className="agnes__head">
+          <h1 className="agnes__title">{t('title')}</h1>
+          <p className="agnes__subtitle">{t('subtitle')}</p>
+        </span>
+        <span
+          className={`agnes__status${status.tone === 'ok' ? '' : status.tone === 'off' ? ' agnes__status--off' : ' agnes__status--loading'}`}
+          title={status.title}
+        >
+          <span className="agnes__statusDot" aria-hidden="true" />
+          {status.text}
+        </span>
       </header>
 
       {state !== null && !state.configured ? (
         <div className="agnes__notice" role="status">
-          <span className="agnes__noticeTitle">{t('config.title')}</span>
-          <span className="agnes__noticeBody">{t('config.body')}</span>
-        </div>
-      ) : null}
-
-      {state !== null && state.configured ? (
-        <div className="agnes__meta">
-          <span>
-            {state.keySource === 'credential'
-              ? t('config.source.credential')
-              : state.keySource === 'environment'
-                ? t('config.source.environment')
-                : t('config.source.none')}
+          <span className="agnes__noticeIcon">
+            <IconInfo />
           </span>
-          {state.upstreamModels.length > 0 ? <span>{t('config.models', { count: state.upstreamModels.length })}</span> : null}
+          <span className="agnes__noticeText">
+            <span className="agnes__noticeTitle">{t('config.title')}</span>
+            <span className="agnes__noticeBody">{t('config.body')}</span>
+          </span>
         </div>
       ) : null}
 
-      <div className="agnes__tabs" role="tablist" aria-label={t('title')}>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'image'}
-          className={tab === 'image' ? 'agnes__tab agnes__tab--on' : 'agnes__tab'}
-          onClick={() => setTab('image')}
-        >
-          {t('tab.image')}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'video'}
-          className={tab === 'video' ? 'agnes__tab agnes__tab--on' : 'agnes__tab'}
-          onClick={() => setTab('video')}
-        >
-          {t('tab.video')}
-        </button>
-      </div>
-
-      {error !== null ? (
-        <div className="agnes__error" role="alert">
-          <span className="agnes__errorTitle">{t('status.failed')}</span>
-          <span className="agnes__errorBody">{error.message}</span>
-          <div className="agnes__actions">
-            {error.retryable ? (
-              <button type="button" className="agnes__button" disabled={disabled} onClick={retry}>
-                {t('gallery.retry')}
-              </button>
-            ) : null}
-            <button type="button" className="agnes__button agnes__button--ghost" onClick={() => setError(null)}>
-              {t('action.dismiss')}
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      {busy !== null ? (
-        <div className="agnes__busy" role="status" aria-live="polite">
-          <span className="agnes__spinner" aria-hidden="true" />
-          <span>{busy.kind === 'image' ? t('status.generatingImage') : t('status.generatingVideo')}</span>
-        </div>
-      ) : null}
-
-      {tab === 'image' ? (
-        <section className="agnes__form" aria-label={t('tab.image')}>
-          <label className="agnes__label">
-            {t('form.prompt')}
-            <textarea
-              className="agnes__field"
-              value={imageDraft.prompt}
-              maxLength={LIMITS.prompt}
-              disabled={disabled}
-              placeholder={t('form.promptPlaceholder')}
-              onChange={(event) => setImageDraft({ ...imageDraft, prompt: event.target.value })}
-            />
-          </label>
-          <div className="agnes__row">
-            <Field
-              label={t('form.model')}
-              value={imageDraft.model}
-              disabled={disabled}
-              options={modelsFor('image').map((model) => ({ value: model.id, label: model.label }))}
-              onChange={(value) => setImageDraft({ ...imageDraft, model: value })}
-            />
-            <Field
-              label={t('form.size')}
-              value={imageDraft.size}
-              disabled={disabled}
-              options={IMAGE_SIZES.map((size) => ({ value: size, label: size }))}
-              onChange={(value) => setImageDraft({ ...imageDraft, size: value as ImageSize })}
-            />
-            <Field
-              label={t('form.ratio')}
-              value={imageDraft.ratio}
-              disabled={disabled}
-              options={IMAGE_RATIOS.map((ratio) => ({ value: ratio, label: ratio }))}
-              onChange={(value) => setImageDraft({ ...imageDraft, ratio: value as ImageRatio })}
-            />
-          </div>
-          {imageDimension === undefined ? null : (
-            <span className="agnes__hint">{t('hint.dimensions', { width: imageDimension.split('×')[0] ?? '', height: imageDimension.split('×')[1] ?? '' })}</span>
-          )}
-          <ReferenceList
-            t={t}
-            urls={imageDraft.references}
-            disabled={disabled}
-            onChange={(references) => setImageDraft({ ...imageDraft, references })}
-          />
-          <div className="agnes__actions">
+      <div className="agnes__body">
+        <section className="agnes__composer" aria-label={tab === 'image' ? t('tab.image') : t('tab.video')}>
+          <div className="agnes__composerScroll">
+          <div className="agnes__tabs" role="tablist" aria-label={t('title')}>
             <button
               type="button"
-              className="agnes__button agnes__button--primary"
-              disabled={disabled || state?.configured === false}
-              onClick={submitImage}
+              role="tab"
+              aria-selected={tab === 'image'}
+              className={tab === 'image' ? 'agnes__tab agnes__tab--on' : 'agnes__tab'}
+              onClick={() => setTab('image')}
             >
-              {t('form.submitImage')}
+              <span className="agnes__tabIcon">
+                <IconImage />
+              </span>
+              {t('tab.image')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'video'}
+              className={tab === 'video' ? 'agnes__tab agnes__tab--on' : 'agnes__tab'}
+              onClick={() => setTab('video')}
+            >
+              <span className="agnes__tabIcon">
+                <IconVideo />
+              </span>
+              {t('tab.video')}
             </button>
           </div>
-        </section>
-      ) : (
-        <section className="agnes__form" aria-label={t('tab.video')}>
-          <label className="agnes__label">
-            {t('form.prompt')}
-            <textarea
-              className="agnes__field"
-              value={videoDraft.prompt}
-              maxLength={LIMITS.prompt}
-              disabled={disabled}
-              placeholder={t('form.promptPlaceholder')}
-              onChange={(event) => setVideoDraft({ ...videoDraft, prompt: event.target.value })}
-            />
-          </label>
-          <div className="agnes__row">
-            <Field
-              label={t('form.model')}
-              value={videoDraft.model}
-              disabled={disabled}
-              options={modelsFor('video').map((model) => ({ value: model.id, label: model.label }))}
-              onChange={(value) => setVideoDraft({ ...videoDraft, model: value })}
-            />
-            <Field
-              label={t('form.mode')}
-              value={videoDraft.mode}
-              disabled={disabled}
-              options={(videoModel?.modes ?? ['text']).map((mode) => ({ value: mode, label: t(`mode.${mode}`) }))}
-              onChange={(value) => setVideoDraft({ ...videoDraft, mode: value as VideoMode })}
-            />
-            <Field
-              label={t('form.size')}
-              value={videoDraft.size}
-              disabled={disabled}
-              options={(videoModel?.sizes ?? ['720P']).map((size) => ({ value: size, label: size }))}
-              onChange={(value) => setVideoDraft({ ...videoDraft, size: value as VideoSize })}
-            />
-            <Field
-              label={t('form.ratio')}
-              value={videoDraft.ratio}
-              disabled={disabled}
-              options={VIDEO_RATIOS.map((ratio) => ({ value: ratio, label: ratio }))}
-              onChange={(value) => setVideoDraft({ ...videoDraft, ratio: value as VideoRatio })}
-            />
-            <Field
-              label={t('form.seconds')}
-              value={String(videoDraft.seconds)}
-              disabled={disabled}
-              options={VIDEO_SECONDS.map((seconds) => ({ value: String(seconds), label: String(seconds) }))}
-              onChange={(value) => setVideoDraft({ ...videoDraft, seconds: Number(value) as VideoSeconds })}
-            />
-            <label className="agnes__label">
-              {t('form.seed')}
-              <input
-                className="agnes__field"
-                type="number"
-                min={0}
-                value={videoDraft.seed}
-                disabled={disabled}
-                placeholder={t('form.seedPlaceholder')}
-                onChange={(event) => setVideoDraft({ ...videoDraft, seed: event.target.value })}
-              />
-            </label>
-          </div>
-          {videoDimension === undefined ? null : (
-            <span className="agnes__hint">
-              {t('hint.dimensions', { width: videoDimension.split('×')[0] ?? '', height: videoDimension.split('×')[1] ?? '' })}
-            </span>
-          )}
-          {videoDraft.mode === 'keyframe' ? (
-            <div className="agnes__row">
-              <label className="agnes__label">
-                {t('form.firstFrame')}
-                <input
-                  className="agnes__field"
-                  type="url"
-                  value={videoDraft.firstFrame}
-                  disabled={disabled}
-                  placeholder={t('form.referencePlaceholder')}
-                  onChange={(event) => setVideoDraft({ ...videoDraft, firstFrame: event.target.value })}
-                />
-              </label>
-              <label className="agnes__label">
-                {t('form.lastFrame')}
-                <input
-                  className="agnes__field"
-                  type="url"
-                  value={videoDraft.lastFrame}
-                  disabled={disabled}
-                  placeholder={t('form.referencePlaceholder')}
-                  onChange={(event) => setVideoDraft({ ...videoDraft, lastFrame: event.target.value })}
-                />
-              </label>
+
+          {error !== null ? (
+            <div className="agnes__error" role="alert">
+              <span className="agnes__errorIcon">
+                <IconAlert />
+              </span>
+              <span className="agnes__errorText">
+                <span className="agnes__errorTitle">{t('status.failed')}</span>
+                <span className="agnes__errorBody">{error.message}</span>
+                <span className="agnes__actions">
+                  {error.retryable ? (
+                    <button type="button" className="agnes__button" disabled={disabled} onClick={retry}>
+                      <IconReset />
+                      {t('gallery.retry')}
+                    </button>
+                  ) : null}
+                  <button type="button" className="agnes__button agnes__button--ghost" onClick={() => setError(null)}>
+                    {t('action.dismiss')}
+                  </button>
+                </span>
+              </span>
             </div>
           ) : null}
-          {videoDraft.mode === 'reference' ? (
-            <ReferenceList
-              t={t}
-              urls={videoDraft.references}
-              disabled={disabled}
-              onChange={(references) => setVideoDraft({ ...videoDraft, references })}
-            />
+
+          {busy !== null ? (
+            <div className="agnes__busy" role="status" aria-live="polite">
+              <span className="agnes__busyRow">
+                <span className="agnes__spinner" aria-hidden="true" />
+                <span>{busy.kind === 'image' ? t('status.generatingImage') : t('status.generatingVideo')}</span>
+              </span>
+              <span className="agnes__busyTrack" aria-hidden="true">
+                <span className="agnes__busyBar" />
+              </span>
+            </div>
           ) : null}
-          <span className="agnes__hint">{t('hint.videoSlow')}</span>
-          <div className="agnes__actions">
+
+          {tab === 'image' ? (
+            <div className="agnes__form">
+              <PromptBox
+                t={t}
+                value={imageDraft.prompt}
+                disabled={disabled}
+                examples={examples}
+                onChange={(prompt) => setImageDraft({ ...imageDraft, prompt })}
+              />
+
+              <SelectField
+                label={t('form.model')}
+                value={imageDraft.model}
+                disabled={disabled}
+                options={modelsFor('image').map((model) => ({ value: model.id, label: model.label }))}
+                onChange={(value) => setImageDraft({ ...imageDraft, model: value })}
+              />
+              {imageModel === undefined ? null : <span className="agnes__hint">{imageModel.note}</span>}
+
+              <Segmented
+                t={t}
+                label={t('form.size')}
+                value={imageDraft.size}
+                disabled={disabled}
+                options={imageSizeOptions}
+                onChange={(value) => setImageDraft({ ...imageDraft, size: value })}
+              />
+
+              <Chips
+                label={t('form.ratio')}
+                value={imageDraft.ratio}
+                disabled={disabled}
+                showRatio
+                options={imageRatioOptions}
+                onChange={(value) => setImageDraft({ ...imageDraft, ratio: value })}
+              />
+
+              {imageDimension === undefined ? null : (
+                <span className="agnes__hintRow">
+                  <span className="agnes__hint">
+                    {t('hint.dimensions', { width: imageDimension[0], height: imageDimension[1] })}
+                  </span>
+                </span>
+              )}
+
+              <ReferenceList
+                t={t}
+                urls={imageDraft.references}
+                disabled={disabled}
+                max={imageModel?.maxImages ?? 8}
+                onChange={(references) => setImageDraft({ ...imageDraft, references })}
+              />
+            </div>
+          ) : (
+            <div className="agnes__form">
+              <PromptBox
+                t={t}
+                value={videoDraft.prompt}
+                disabled={disabled}
+                examples={examples}
+                onChange={(prompt) => setVideoDraft({ ...videoDraft, prompt })}
+              />
+
+              <SelectField
+                label={t('form.model')}
+                value={videoDraft.model}
+                disabled={disabled}
+                options={modelsFor('video').map((model) => ({ value: model.id, label: model.label }))}
+                onChange={(value) => setVideoDraft({ ...videoDraft, model: value })}
+              />
+              {videoModel === undefined ? null : <span className="agnes__hint">{videoModel.note}</span>}
+
+              <Segmented
+                t={t}
+                label={t('form.mode')}
+                value={videoDraft.mode}
+                disabled={disabled}
+                options={videoModeOptions}
+                onChange={(value) => setVideoDraft({ ...videoDraft, mode: value })}
+              />
+
+              <Chips
+                label={t('form.size')}
+                value={videoDraft.size}
+                disabled={disabled}
+                showRatio={false}
+                options={videoSizeOptions}
+                onChange={(value) => setVideoDraft({ ...videoDraft, size: value })}
+              />
+
+              <Chips
+                label={t('form.ratio')}
+                value={videoDraft.ratio}
+                disabled={disabled}
+                showRatio
+                options={videoRatioOptions}
+                onChange={(value) => setVideoDraft({ ...videoDraft, ratio: value })}
+              />
+
+              <Chips
+                label={t('form.seconds')}
+                value={String(videoDraft.seconds)}
+                disabled={disabled}
+                showRatio={false}
+                options={videoSecondsOptions}
+                onChange={(value) => setVideoDraft({ ...videoDraft, seconds: Number(value) as VideoSeconds })}
+              />
+
+              <label className="agnes__label">
+                {t('form.seed')}
+                <input
+                  className="agnes__field"
+                  type="number"
+                  min={0}
+                  value={videoDraft.seed}
+                  disabled={disabled}
+                  placeholder={t('form.seedPlaceholder')}
+                  onChange={(event) => setVideoDraft({ ...videoDraft, seed: event.target.value })}
+                />
+              </label>
+
+              {videoDimension === undefined ? null : (
+                <span className="agnes__hintRow">
+                  <span className="agnes__hint">
+                    {t('hint.dimensions', { width: videoDimension[0], height: videoDimension[1] })}
+                  </span>
+                </span>
+              )}
+
+              {videoDraft.mode === 'keyframe' ? (
+                <div className="agnes__row">
+                  <label className="agnes__label">
+                    {t('form.firstFrame')}
+                    <input
+                      className="agnes__field"
+                      type="url"
+                      value={videoDraft.firstFrame}
+                      disabled={disabled}
+                      placeholder={t('form.referencePlaceholder')}
+                      onChange={(event) => setVideoDraft({ ...videoDraft, firstFrame: event.target.value })}
+                    />
+                  </label>
+                  <label className="agnes__label">
+                    {t('form.lastFrame')}
+                    <input
+                      className="agnes__field"
+                      type="url"
+                      value={videoDraft.lastFrame}
+                      disabled={disabled}
+                      placeholder={t('form.referencePlaceholder')}
+                      onChange={(event) => setVideoDraft({ ...videoDraft, lastFrame: event.target.value })}
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              {videoDraft.mode === 'reference' ? (
+                <ReferenceList
+                  t={t}
+                  urls={videoDraft.references}
+                  disabled={disabled}
+                  max={videoModel?.maxImages ?? 8}
+                  onChange={(references) => setVideoDraft({ ...videoDraft, references })}
+                />
+              ) : null}
+
+              <span className="agnes__hint">{t('hint.videoSlow')}</span>
+            </div>
+          )}
+          </div>
+
+          {/* The action row is pinned, not the last field of a scrolling form:
+              on the video tab the submit used to sit below the fold, so the
+              panel's primary action needed a page scroll to reach while nothing
+              else on screen was moving. */}
+          <div className="agnes__composerFoot">
             <button
               type="button"
               className="agnes__button agnes__button--primary"
               disabled={disabled || state?.configured === false}
-              onClick={submitVideo}
+              onClick={tab === 'image' ? submitImage : submitVideo}
             >
-              {t('form.submitVideo')}
+              <IconSpark />
+              {tab === 'image' ? t('form.submitImage') : t('form.submitVideo')}
             </button>
+            <span className="agnes__hint">
+              {tab === 'image' ? t('hint.imageFast') : t('hint.videoSlow')}
+            </span>
           </div>
         </section>
-      )}
 
-      <section aria-label={t('gallery.title')}>
-        <div className="agnes__galleryHead">
-          <h2 className="agnes__galleryTitle">{t('gallery.title')}</h2>
-          <span className="agnes__count">{t('gallery.count', { count: generations.length })}</span>
-          <span className="agnes__spacer" />
-          <div className="agnes__filters">
-            {(['all', 'image', 'video'] as const).map((option) => (
+        <section className="agnes__gallery" aria-label={t('gallery.title')}>
+          <div className="agnes__galleryHead">
+            <h2 className="agnes__galleryTitle">
+              <IconFrame />
+              {t('gallery.title')}
+            </h2>
+            <span className="agnes__count">{t('gallery.count', { count: generations.length })}</span>
+            <span className="agnes__spacer" />
+            <div className="agnes__filters" role="tablist" aria-label={t('gallery.title')}>
+              {(['all', 'image', 'video'] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  role="tab"
+                  aria-selected={filter === option}
+                  className={filter === option ? 'agnes__filter agnes__filter--on' : 'agnes__filter'}
+                  onClick={() => setFilter(option)}
+                >
+                  {option === 'all'
+                    ? t('gallery.all')
+                    : option === 'image'
+                      ? `${t('gallery.images')} ${String(imageCount)}`
+                      : `${t('gallery.videos')} ${String(videoCount)}`}
+                </button>
+              ))}
+            </div>
+            {generations.length > 0 ? (
               <button
-                key={option}
                 type="button"
-                className={filter === option ? 'agnes__chip agnes__chip--on' : 'agnes__chip'}
-                onClick={() => setFilter(option)}
-              >
-                {option === 'all' ? t('gallery.all') : option === 'image' ? `${t('gallery.images')} ${imageCount}` : `${t('gallery.videos')} ${videoCount}`}
-              </button>
-            ))}
-          </div>
-          {generations.length > 0 ? (
-            <button type="button" className="agnes__button agnes__button--danger" disabled={disabled} onClick={() => void clearAll()}>
-              {t('gallery.clear')}
-            </button>
-          ) : null}
-        </div>
-
-        {state === null ? (
-          <div className="agnes__empty">{loadError ?? t('gallery.loading')}</div>
-        ) : filtered.length === 0 ? (
-          <div className="agnes__empty">{generations.length === 0 ? t('gallery.empty') : t('gallery.emptyFiltered')}</div>
-        ) : (
-          <div className="agnes__grid">
-            {filtered.map((generation) => (
-              <GenerationCard
-                key={generation.id}
-                t={t}
-                generation={generation}
+                className="agnes__iconBtn agnes__iconBtn--danger"
                 disabled={disabled}
-                onDelete={(id) => void deleteOne(id)}
-                onRetry={() => retry()}
-                onOpen={openViewer}
-              />
-            ))}
+                aria-label={t('gallery.clear')}
+                title={t('gallery.clear')}
+                onClick={() => void clearAll()}
+              >
+                <IconTrash />
+              </button>
+            ) : null}
           </div>
-        )}
-      </section>
 
-      {viewing !== undefined && viewing.kind === 'image' && viewing.asset !== undefined ? (
-        <ImageViewer t={t} generation={viewing} asset={viewing.asset} onClose={closeViewer} />
-      ) : null}
+          {state === null ? (
+            <div className="agnes__empty">
+              <span className="agnes__emptyIcon">
+                <IconFrame />
+              </span>
+              <span className="agnes__emptyTitle">{loadError ?? t('gallery.loading')}</span>
+            </div>
+          ) : filtered.length === 0 && busy === null ? (
+            <div className="agnes__empty">
+              <span className="agnes__emptyIcon">
+                <IconFrame />
+              </span>
+              <span className="agnes__emptyTitle">{generations.length === 0 ? t('gallery.empty') : t('gallery.emptyFiltered')}</span>
+              <span className="agnes__emptyBody">{generations.length === 0 ? t('gallery.emptyHint') : t('gallery.emptyFilteredHint')}</span>
+            </div>
+          ) : (
+            <div className="agnes__grid">
+              {busy !== null ? <PendingCard t={t} kind={busy.kind} /> : null}
+              {filtered.map((generation) => (
+                <GenerationCard
+                  key={generation.id}
+                  t={t}
+                  generation={generation}
+                  disabled={disabled}
+                  onDelete={(id) => void deleteOne(id)}
+                  onRetry={() => retry()}
+                  onOpen={openViewer}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
 
       <span className="agnes__hint">{t('hint.key')}</span>
+
+      {viewing !== undefined && viewing.asset !== undefined ? (
+        <ImageViewer
+          t={t}
+          generation={viewing}
+          asset={viewing.asset}
+          position={{ index: viewingIndex, total: viewable.length }}
+          {...(viewable.length > 1 ? { onPrev: () => stepViewer(-1), onNext: () => stepViewer(1) } : {})}
+          onClose={closeViewer}
+        />
+      ) : null}
     </div>
   )
 }
+
+/** Re-exported for tests that assert the model table drives the controls. */
+export type { ModelSpec }

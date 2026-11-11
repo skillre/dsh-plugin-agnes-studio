@@ -219,68 +219,141 @@ try {
   // 4. The panel reports configuration state rather than pretending to work.
   //    The state arrives from the Host after mount, so wait for it instead of
   //    sampling the DOM in the gap where neither branch has rendered yet.
+  //
+  //    The status pill is always present (it reports 正在连接… before the first
+  //    state arrives), so this waits for it to leave that state rather than for
+  //    an element to appear.
   await until(
     cdp.evaluate,
-    `document.querySelector('.agnes__notice') !== null || document.querySelector('.agnes__meta') !== null`,
+    `(() => {
+      const pill = document.querySelector('.agnes__status');
+      if (!pill) return null;
+      const text = pill.textContent.trim();
+      if (text.includes('正在连接') || text === '') return null;
+      return text;
+    })()`,
     'the panel configuration state',
   )
   const configured = await cdp.evaluate(
     `(() => {
+      const pill = document.querySelector('.agnes__status');
       const notice = document.querySelector('.agnes__notice');
-      const meta = document.querySelector('.agnes__meta');
-      return JSON.stringify({ notice: notice ? notice.textContent.slice(0, 80) : null, meta: meta ? meta.textContent.slice(0, 120) : null, submitDisabled: (() => { const b = [...document.querySelectorAll('button')].find((n) => n.textContent.includes('生成图片')); return b ? b.disabled : null })() });
+      const submit = document.querySelector('.agnes__button--primary');
+      return JSON.stringify({
+        status: pill ? pill.textContent.trim() : null,
+        tone: pill ? pill.className : null,
+        notice: notice ? notice.textContent.slice(0, 90) : null,
+        submitDisabled: submit ? submit.disabled : null,
+      });
     })()`,
   )
   const state = JSON.parse(configured)
-  check('browser-config-state', state.notice ?? state.meta)
+  check('browser-config-state', `${String(state.status)}${state.notice === null ? '' : ' + notice'}`)
   await cdp.shot('02-panel-configured.png')
 
-  // 5. The image form renders its controls, and its option sets come from the
-  //    capability table (not from a hard-coded list in the component).
+  // 5. The composer renders its controls, and their option sets come from the
+  //    capability table (not from a hard-coded list in the component). The
+  //    control SHAPE is also asserted: the panel picks a segmented control for a
+  //    small mutually-exclusive set and chips for a large one, so a future
+  //    refactor that collapses everything back into a <select> fails here.
   const imageForm = await cdp.evaluate(
     `(() => {
+      const read = (label) => {
+        const group = [...document.querySelectorAll('[role="radiogroup"]')].find((n) => n.getAttribute('aria-label') === label);
+        if (!group) return null;
+        return {
+          shape: group.className,
+          values: [...group.querySelectorAll('[role="radio"]')].map((n) => n.textContent.trim()),
+          checked: [...group.querySelectorAll('[role="radio"]')].filter((n) => n.getAttribute('aria-checked') === 'true').map((n) => n.textContent.trim()),
+        };
+      };
       const selects = [...document.querySelectorAll('select.agnes__field')];
-      const textarea = document.querySelector('textarea.agnes__field');
       return JSON.stringify({
+        prompt: document.querySelector('textarea.agnes__prompt') !== null,
         selects: selects.length,
-        textarea: textarea !== null,
-        options: selects.map((s) => [...s.options].map((o) => o.value)),
+        modelOptions: selects[0] ? [...selects[0].options].map((o) => o.value) : [],
+        size: read('分辨率'),
+        ratio: read('比例'),
+        examples: document.querySelectorAll('.agnes__example').length,
+        counter: document.querySelector('.agnes__counter')?.textContent.trim() ?? null,
       });
     })()`,
   )
   const form = JSON.parse(imageForm)
-  if (!form.textarea) throw new Error('the prompt textarea did not render')
-  if (form.selects !== 3) throw new Error(`expected 3 image selects (model/size/ratio), got ${String(form.selects)}`)
-  const sizes = form.options[1] ?? []
-  if (sizes.join(',') !== '1K,2K,3K,4K') throw new Error(`unexpected image sizes: ${sizes.join(',')}`)
-  check('browser-image-form-controls', `${String(form.selects)} selects`)
+  if (!form.prompt) throw new Error('the prompt textarea did not render')
+  if (form.selects !== 1) throw new Error(`expected exactly 1 select (model), got ${String(form.selects)}`)
+  if (form.size === null) throw new Error('the image resolution group did not render')
+  if (form.size.shape !== 'agnes__seg') throw new Error(`the 4-way resolution must be a segmented control, got ${String(form.size.shape)}`)
+  if (form.size.values.join(',') !== '1K,2K,3K,4K') throw new Error(`unexpected image sizes: ${form.size.values.join(',')}`)
+  if (form.ratio === null) throw new Error('the image ratio group did not render')
+  if (form.ratio.shape !== 'agnes__chips') throw new Error(`the 8-way ratio must be a chip row, got ${String(form.ratio.shape)}`)
+  if (form.ratio.values.length !== 8) throw new Error(`expected 8 ratios, got ${String(form.ratio.values.length)}`)
+  if (form.ratio.checked.length !== 1) throw new Error('exactly one ratio must be selected')
+  if (form.examples < 3) throw new Error(`expected example prompts, got ${String(form.examples)}`)
+  if (form.counter === null) throw new Error('the prompt character counter did not render')
+  check('browser-image-form-controls', `seg ${form.size.values.join('/')}, ${String(form.ratio.values.length)} ratio chips`)
+
+  // 5b. The layout is two panes, not one long column.
+  //
+  //     The previous panel stacked a full-width form above a full-width gallery:
+  //     every control was ~1200px wide, the prompt field was a letterbox, and the
+  //     results started below the fold. This measures the actual geometry, because
+  //     "the grid template says two columns" is satisfied by a collapsed layout
+  //     too — a zero-width second column still has two columns in the computed
+  //     style.
+  const layout = await cdp.evaluate(
+    `(() => {
+      const composer = document.querySelector('.agnes__composer');
+      const gallery = document.querySelector('.agnes__gallery');
+      const body = document.querySelector('.agnes__body');
+      if (!composer || !gallery || !body) return null;
+      const composerBox = composer.getBoundingClientRect();
+      const galleryBox = gallery.getBoundingClientRect();
+      const columns = getComputedStyle(body).gridTemplateColumns.split(' ').length;
+      return JSON.stringify({
+        columns,
+        composerWidth: Math.round(composerBox.width),
+        galleryWidth: Math.round(galleryBox.width),
+        composerTop: Math.round(composerBox.top),
+        galleryTop: Math.round(galleryBox.top),
+        viewportWidth: window.innerWidth,
+      });
+    })()`,
+  )
+  const layoutState = JSON.parse(layout)
+  if (layoutState === null) throw new Error('the two-pane body did not render')
+  if (layoutState.columns < 2) throw new Error(`the body is not a two-column grid: ${String(layoutState.columns)} column(s)`)
+  // Side by side, not stacked: the gallery starts at the same height as the form.
+  if (Math.abs(layoutState.composerTop - layoutState.galleryTop) > 24) {
+    throw new Error(`the panes are stacked, not side by side: composer top ${String(layoutState.composerTop)}, gallery top ${String(layoutState.galleryTop)}`)
+  }
+  // The composer must not stretch to the full panel: a 1200px-wide prompt field
+  // is unreadable, and that is exactly what the redesign removes.
+  if (layoutState.composerWidth > layoutState.viewportWidth * 0.62) {
+    throw new Error(`the composer is still full width: ${String(layoutState.composerWidth)} of ${String(layoutState.viewportWidth)}`)
+  }
+  if (layoutState.galleryWidth < layoutState.composerWidth) {
+    throw new Error(`the gallery is narrower than the composer: ${String(layoutState.galleryWidth)} vs ${String(layoutState.composerWidth)}`)
+  }
+  check('browser-two-pane-layout', `${String(layoutState.composerWidth)}px + ${String(layoutState.galleryWidth)}px side by side`)
 
   // 6. Switch to the video tab: the size list must narrow to the model's real
   //    capability (Flash is 720P only), which is the behaviour the panel's whole
   //    design exists to guarantee.
   await cdp.evaluate(`(() => { const tab = [...document.querySelectorAll('[role="tab"]')].find((n) => n.textContent.includes('生视频')); tab?.click(); return true })()`)
   await new Promise((resolve) => setTimeout(resolve, 400))
-  const videoForm = await cdp.evaluate(
-    `(() => {
-      const selects = [...document.querySelectorAll('select.agnes__field')];
-      const byLabel = {};
-      for (const select of selects) {
-        const label = select.closest('label')?.textContent?.replace(select.textContent, '').trim() ?? '';
-        byLabel[label] = [...select.options].map((o) => o.value);
-      }
-      return JSON.stringify(byLabel);
-    })()`,
-  )
-  const videoOptions = JSON.parse(videoForm)
-  const allSizes = Object.entries(videoOptions).find(([label]) => label.startsWith('分辨率'))?.[1] ?? []
-  if (allSizes.join(',') !== '720P,1080P,1K,2K') throw new Error(`unexpected video sizes: ${allSizes.join(',')}`)
-  check('browser-video-form-controls', allSizes.join('/'))
+  const readVideoSizes = `(() => {
+    const group = [...document.querySelectorAll('[role="radiogroup"]')].find((n) => n.getAttribute('aria-label') === '分辨率');
+    return group ? [...group.querySelectorAll('[role="radio"]')].map((n) => n.textContent.trim()).join(',') : 'missing';
+  })()`
+  const allSizes = await cdp.evaluate(readVideoSizes)
+  if (allSizes !== '720P,1080P,1K,2K') throw new Error(`unexpected video sizes: ${String(allSizes)}`)
+  check('browser-video-form-controls', String(allSizes))
 
   // Narrowing: choose the Flash model and confirm the size list collapses.
   const narrowed = await cdp.evaluate(
     `(() => {
-      const selects = [...document.querySelectorAll('select.agnes__field')];
-      const modelSelect = selects.find((s) => [...s.options].some((o) => o.value === 'agnes-video-2.5-flash'));
+      const modelSelect = [...document.querySelectorAll('select.agnes__field')].find((s) => [...s.options].some((o) => o.value === 'agnes-video-2.5-flash'));
       if (!modelSelect) return 'no model select';
       modelSelect.value = 'agnes-video-2.5-flash';
       modelSelect.dispatchEvent(new Event('change', { bubbles: true }));
@@ -288,16 +361,13 @@ try {
     })()`,
   )
   if (narrowed !== 'dispatched') throw new Error(`could not switch the video model: ${String(narrowed)}`)
-  await new Promise((resolve) => setTimeout(resolve, 500))
-  const narrowedSizes = await cdp.evaluate(
-    `(() => {
-      const selects = [...document.querySelectorAll('select.agnes__field')];
-      const size = selects.find((s) => s.closest('label')?.textContent?.includes('分辨率'));
-      return size ? [...size.options].map((o) => o.value).join(',') : 'missing';
-    })()`,
-  )
-  if (narrowedSizes !== '720P') throw new Error(`Flash did not narrow the size list; got ${String(narrowedSizes)}`)
-  check('browser-flash-narrows-sizes', String(narrowedSizes))
+  const narrowedSizes = await until(
+    cdp.evaluate,
+    `(() => { const value = ${readVideoSizes}; return value === 'missing' ? null : value })()`,
+    'the narrowed video size list',
+  ).then((value) => String(value))
+  if (narrowedSizes !== '720P') throw new Error(`Flash did not narrow the size list; got ${narrowedSizes}`)
+  check('browser-flash-narrows-sizes', narrowedSizes)
   await cdp.shot('03-video-tab-flash-720p.png')
 
   // 7. The submit is guarded, and the guard is the one the panel can express.
@@ -318,15 +388,67 @@ try {
       if (!submit) return JSON.stringify({ error: 'no submit' });
       const disabled = submit.disabled;
       if (!disabled) submit.click();
-      return JSON.stringify({ disabled });
+      return JSON.stringify({ disabled, hasPrimary: submit.classList.contains('agnes__button--primary') });
     })()`,
   )
   const guard = JSON.parse(submitGuard)
   if (guard.error !== undefined) throw new Error('the video submit button did not render')
+  if (!guard.hasPrimary) throw new Error('the submit lost its primary styling')
+
+  // The submit must be REACHABLE without scrolling. On the video tab the form is
+  // taller than the pane, and the previous layout put the button at the end of
+  // it — below the fold, so the panel's primary action needed a page scroll.
+  const reachable = await cdp.evaluate(
+    `(() => {
+      const submit = [...document.querySelectorAll('button')].find((n) => n.textContent.includes('生成视频'));
+      if (!submit) return null;
+      const box = submit.getBoundingClientRect();
+      const composer = document.querySelector('.agnes__composer');
+      const composerBox = composer ? composer.getBoundingClientRect() : null;
+      return JSON.stringify({
+        top: Math.round(box.top),
+        bottom: Math.round(box.bottom),
+        viewportHeight: window.innerHeight,
+        insideComposer: composerBox === null ? null : box.bottom <= composerBox.bottom + 1 && box.top >= composerBox.top - 1,
+      });
+    })()`,
+  )
+  const reachState = JSON.parse(reachable)
+  if (reachState === null) throw new Error('the submit button is not in the DOM')
+  if (reachState.bottom > reachState.viewportHeight) {
+    throw new Error(
+      `the submit is below the fold: bottom ${String(reachState.bottom)} of ${String(reachState.viewportHeight)}`,
+    )
+  }
+  if (reachState.insideComposer !== true) throw new Error('the submit escaped the composer pane')
+  check('browser-submit-reachable', `bottom ${String(reachState.bottom)} of ${String(reachState.viewportHeight)}`)
   if (guard.disabled) {
     const notice = await cdp.evaluate(`document.querySelector('.agnes__notice') !== null`)
     if (!notice) throw new Error('the submit is disabled without an explanation on the panel')
-    check('browser-submit-guarded-unconfigured', 'disabled + notice, no key in this run')
+    // A disabled primary used to be the gradient at 45% opacity, i.e. a pale
+    // lilac slab with white text on it. It must now be a flat muted surface with
+    // a readable label, so the contrast is measured rather than assumed.
+    const contrast = await cdp.evaluate(
+      `(() => {
+        const button = [...document.querySelectorAll('button')].find((n) => n.textContent.includes('生成视频'));
+        if (!button) return null;
+        const style = getComputedStyle(button);
+        return JSON.stringify({
+          color: style.color,
+          background: style.backgroundColor,
+          backgroundImage: style.backgroundImage,
+          opacity: style.opacity,
+        });
+      })()`,
+    )
+    const disabledStyle = JSON.parse(contrast)
+    if (disabledStyle.backgroundImage !== 'none') {
+      throw new Error(`a disabled primary must not keep the gradient: ${String(disabledStyle.backgroundImage).slice(0, 60)}`)
+    }
+    if (Number(disabledStyle.opacity) < 0.99) {
+      throw new Error(`a disabled primary must not be faded over its own label: opacity ${String(disabledStyle.opacity)}`)
+    }
+    check('browser-submit-guarded-unconfigured', 'disabled + notice, flat muted surface')
   } else {
     const promptWarning = await until(
       cdp.evaluate,
@@ -336,7 +458,13 @@ try {
     check('browser-refuses-empty-prompt', String(promptWarning).slice(0, 40))
   }
 
-  // 8. The gallery renders the seeded record as a grid card.
+  // 8. The gallery renders the seeded records as grid cards.
+  //
+  //    The image tab is restored first: leaving the video tab selected would make
+  //    this screenshot a duplicate of the previous one, which is not evidence of
+  //    anything the previous shot does not already show.
+  await cdp.evaluate(`(() => { const tab = [...document.querySelectorAll('[role="tab"]')].find((n) => n.textContent.includes('生图')); tab?.click(); return true })()`)
+  await new Promise((resolve) => setTimeout(resolve, 300))
   //
   //    The harness seeds one finished image before boot (see
   //    `scripts/seed-fixture.mjs`), so this asserts the populated path. The empty
@@ -359,28 +487,151 @@ try {
   )
   const galleryState = JSON.parse(gallery)
   if (galleryState.title === null) throw new Error('the gallery heading did not render')
-  if (!galleryState.grid) throw new Error('the seeded record did not render a result grid')
-  if (galleryState.cards !== 1) throw new Error(`expected the one seeded card, got ${String(galleryState.cards)}`)
-  if (galleryState.empty !== null) throw new Error('the gallery showed its empty state while holding a record')
-  check('browser-gallery-card-grid', `${String(galleryState.cards)} card, ${galleryState.title}`)
+  if (!galleryState.grid) throw new Error('the seeded records did not render a result grid')
+  if (galleryState.cards !== 2) throw new Error(`expected the two seeded cards, got ${String(galleryState.cards)}`)
+  if (galleryState.empty !== null) throw new Error('the gallery showed its empty state while holding records')
+  check('browser-gallery-card-grid', `${String(galleryState.cards)} cards, ${galleryState.title}`)
+  // The screenshot is taken BEFORE the filter experiment below: the filter leaves
+  // the pane scrolled to wherever the sticky header put it, and a shot of that
+  // state would show the same thing as this one but less clearly.
   await cdp.shot('04-gallery-seeded.png')
 
-  // 9. Theme: the panel must stay legible in both themes, which is why it uses
-  //    inherited colour rather than a fixed palette.
+  // 8b. The filter tabs report the real counts and actually filter.
+  //
+  //     A tab that renders but does not filter is the same class of defect as a
+  //     button that renders but does nothing. Both seeded records are images, so
+  //     selecting 视频 must empty the grid and selecting 图片 must restore it.
+  const filterCounts = await cdp.evaluate(
+    `(() => {
+      const tabs = [...document.querySelectorAll('.agnes__filter')];
+      return JSON.stringify(tabs.map((t) => ({ label: t.textContent.trim(), selected: t.getAttribute('aria-selected') })));
+    })()`,
+  )
+  const filterState = JSON.parse(filterCounts)
+  if (filterState.length !== 3) throw new Error(`expected 3 gallery filters, got ${String(filterState.length)}`)
+  const imageFilter = filterState.find((entry) => entry.label.startsWith('图片'))
+  const videoFilter = filterState.find((entry) => entry.label.startsWith('视频'))
+  if (imageFilter === undefined || !imageFilter.label.endsWith('2')) {
+    throw new Error(`the image filter count is wrong: ${JSON.stringify(imageFilter)}`)
+  }
+  if (videoFilter === undefined || !videoFilter.label.endsWith('0')) {
+    throw new Error(`the video filter count is wrong: ${JSON.stringify(videoFilter)}`)
+  }
+  await cdp.evaluate(
+    `(() => { const tab = [...document.querySelectorAll('.agnes__filter')].find((n) => n.textContent.trim().startsWith('视频')); tab?.click(); return true })()`,
+  )
+  const filteredEmpty = await until(
+    cdp.evaluate,
+    `(() => {
+      const empty = document.querySelector('.agnes__empty');
+      const cards = document.querySelectorAll('.agnes__card').length;
+      if (!empty) return null;
+      return JSON.stringify({ text: empty.textContent.trim().slice(0, 40), cards });
+    })()`,
+    'the video filter to empty the grid',
+  )
+  const filteredState = JSON.parse(filteredEmpty)
+  if (filteredState.cards !== 0) throw new Error('the video filter did not hide the image cards')
+  check('browser-gallery-filters', `${imageFilter.label} / ${videoFilter.label} -> ${String(filteredState.text)}`)
+  await cdp.evaluate(
+    `(() => { const tab = [...document.querySelectorAll('.agnes__filter')].find((n) => n.textContent.trim().startsWith('全部')); tab?.click(); return true })()`,
+  )
+  await until(cdp.evaluate, `document.querySelectorAll('.agnes__card').length === 2`, 'the grid to restore under the All filter')
+
+  // 9. Theme: the panel must follow the host theme.
+  //
+  //    The host flips themes by putting `data-ds-dark-theme` on <body>, and the
+  //    panel's tokens read `--dsw-*` properties that the host redefines under
+  //    that attribute. Toggling a `.dark` class (what the previous version of this
+  //    check did) proves nothing: no rule keys off it, so the assertion passed
+  //    while the panel was in fact hard-coded to inherited colour only.
+  //
+  //    So the real attribute is flipped and the panel's own computed surface and
+  //    text colours are compared across the two states.
+  //
+  //    The direction is decided at run time, not assumed: the profile this
+  //    harness boots may come up in either theme, and a check that hard-codes
+  //    "add the attribute, expect dark" silently passes (or fails) depending on
+  //    which one it happened to get.
   const themed = await cdp.evaluate(
     `(() => {
-      const root = document.documentElement;
-      const before = getComputedStyle(root).colorScheme || 'unset';
-      root.classList.toggle('dark');
-      const panel = document.querySelector('.agnes__title');
-      const color = panel ? getComputedStyle(panel).color : null;
-      root.classList.toggle('dark');
-      return JSON.stringify({ before, color });
+      const body = document.body;
+      const sample = () => {
+        const card = document.querySelector('.agnes__card') ?? document.querySelector('.agnes__composer');
+        const title = document.querySelector('.agnes__title');
+        if (!card || !title) return null;
+        return {
+          surface: getComputedStyle(card).backgroundColor,
+          text: getComputedStyle(title).color,
+        };
+      };
+      const had = body.hasAttribute('data-ds-dark-theme');
+      const before = sample();
+      // Flip to the OTHER theme.
+      if (had) body.removeAttribute('data-ds-dark-theme');
+      else body.setAttribute('data-ds-dark-theme', '');
+      const after = sample();
+      // Restore the theme the app was actually in.
+      if (had) body.setAttribute('data-ds-dark-theme', '');
+      else body.removeAttribute('data-ds-dark-theme');
+      return JSON.stringify({ from: had ? 'dark' : 'light', to: had ? 'light' : 'dark', before, after });
     })()`,
   )
   const themeState = JSON.parse(themed)
-  if (themeState.color === null) throw new Error('the panel title lost its colour after a theme toggle')
-  check('browser-theme-toggle', themeState.color)
+  if (themeState.before === null || themeState.after === null) throw new Error('the panel lost its colours across a theme switch')
+  if (themeState.before.surface === themeState.after.surface) {
+    throw new Error(
+      `the panel surface did not follow the theme (${themeState.from} -> ${themeState.to}): ${String(themeState.before.surface)} in both`,
+    )
+  }
+  if (themeState.before.text === themeState.after.text) {
+    throw new Error(
+      `the panel text colour did not follow the theme (${themeState.from} -> ${themeState.to}): ${String(themeState.before.text)} in both`,
+    )
+  }
+  // Both surfaces must stay readable: the point of using host tokens is that
+  // neither theme collapses the panel into its own background.
+  const luminance = (color) => {
+    const match = String(color).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
+    if (match === null) return null
+    return (Number(match[1]) * 299 + Number(match[2]) * 587 + Number(match[3]) * 114) / 1000
+  }
+  const surfaceLuma = luminance(themeState.before.surface)
+  const textLuma = luminance(themeState.before.text)
+  if (surfaceLuma !== null && textLuma !== null && Math.abs(surfaceLuma - textLuma) < 60) {
+    throw new Error(
+      `the panel text and its surface are too close to read: text ${String(themeState.before.text)} on ${String(themeState.before.surface)}`,
+    )
+  }
+  check(
+    'browser-theme-toggle',
+    `${themeState.from} ${String(themeState.before.surface)} -> ${themeState.to} ${String(themeState.after.surface)}`,
+  )
+
+  // Capture the theme the run did NOT boot in. A panel that only looks right in
+  // one theme is half a panel, and a screenshot of the untested half is the only
+  // way to review it — the computed colours above say "it changed", not "it
+  // reads".
+  await cdp.evaluate(
+    `(() => {
+      const body = document.body;
+      if (${JSON.stringify(themeState.to)} === 'light') body.removeAttribute('data-ds-dark-theme');
+      else body.setAttribute('data-ds-dark-theme', '');
+      return true;
+    })()`,
+  )
+  await new Promise((resolve) => setTimeout(resolve, 350))
+  await cdp.shot(`09-${themeState.to}-theme.png`)
+  // Restore the boot theme so the remaining shots match a normal session.
+  await cdp.evaluate(
+    `(() => {
+      const body = document.body;
+      if (${JSON.stringify(themeState.from)} === 'dark') body.setAttribute('data-ds-dark-theme', '');
+      else body.removeAttribute('data-ds-dark-theme');
+      return true;
+    })()`,
+  )
+  await new Promise((resolve) => setTimeout(resolve, 250))
 
   // 10. Locale: the sidebar label and heading come from the registered
   //     dictionaries, so a missing namespace would surface the bare key.
@@ -408,34 +659,42 @@ try {
       const open = document.querySelector('.agnes__open');
       const thumb = document.querySelector('.agnes__thumbButton');
       const image = document.querySelector('img.agnes__thumb');
-      if (!open || !thumb || !image) return null;
+      const veil = document.querySelector('.agnes__thumbVeil');
+      if (!open || !thumb || !image || !veil) return null;
+      const frame = thumb.getBoundingClientRect();
+      const natural = image.naturalWidth > 0 ? image.naturalWidth / image.naturalHeight : 0;
       return JSON.stringify({
         openLabel: open.textContent.trim(),
         openTag: open.tagName,
         thumbTag: thumb.tagName,
         imgSrc: image.getAttribute('src'),
-        imgComplete: image.complete,
         imgWidth: image.naturalWidth,
+        frameWidth: Math.round(frame.width),
+        frameHeight: Math.round(frame.height),
+        naturalAspect: Math.round(natural * 100) / 100,
+        objectFit: getComputedStyle(image).objectFit,
       });
     })()`,
     'the gallery card with its open control',
   )
   const cardState = JSON.parse(card)
   if (cardState.openTag !== 'BUTTON') throw new Error(`the open control must be a button, got ${String(cardState.openTag)}`)
-  if (cardState.openLabel !== '打开原图') throw new Error(`unexpected open label: ${String(cardState.openLabel)}`)
+  if (cardState.openLabel !== '查看大图') throw new Error(`unexpected open label: ${String(cardState.openLabel)}`)
   // The seeded PNG must have actually loaded through the authenticated media
   // route; a 401 would leave naturalWidth at 0 and the viewer would show nothing.
   if (cardState.imgWidth === 0) throw new Error('the gallery thumbnail did not load from the media route')
-  check('browser-gallery-card', `${String(cardState.imgWidth)}px source`)
-  // The card's action row sits below the fold in the default window, so the
-  // evidence screenshot would show a thumbnail with no visible control. Scroll
-  // the open button into view first; a screenshot that does not contain the
-  // thing it claims to prove is not evidence.
-  await cdp.evaluate(
-    `(() => { document.querySelector('.agnes__open')?.scrollIntoView({ block: 'center' }); return true })()`,
-  )
-  await new Promise((resolve) => setTimeout(resolve, 300))
-  await cdp.shot('06-gallery-card.png')
+  // Every thumbnail frame is 4:3 with `cover`, so the grid cannot develop holes
+  // under cards whose source aspect ratios differ.
+  if (cardState.frameWidth === 0 || cardState.frameHeight === 0) throw new Error('the thumbnail frame has no layout box')
+  const frameAspect = cardState.frameWidth / cardState.frameHeight
+  if (Math.abs(frameAspect - 4 / 3) > 0.05) {
+    throw new Error(`the thumbnail frame is not 4:3: ${String(cardState.frameWidth)}x${String(cardState.frameHeight)}`)
+  }
+  if (cardState.objectFit !== 'cover') throw new Error(`the thumbnail must crop with cover, got ${String(cardState.objectFit)}`)
+  check('browser-gallery-card', `${String(cardState.imgWidth)}px source in a 4:3 frame`)
+  // No separate screenshot here: with the two-pane layout the card's action row
+  // is visible in shot 04 already, and a second image that shows the same thing
+  // is not evidence of anything the first one does not prove.
 
   // 12. Clicking it opens the in-panel viewer, at fit zoom, on the same URL.
   await cdp.evaluate(`(() => { document.querySelector('.agnes__open').click(); return true })()`)
@@ -606,6 +865,107 @@ try {
   await until(cdp.evaluate, `document.querySelector('.agnes__lightbox') === null`, 'the viewer to close on a backdrop click')
   check('browser-viewer-backdrop-closes')
 
+  // 15b. The viewer steps between pictures, by arrow button and by arrow key.
+  //
+  //      The seeded profile holds two images, so this exercises the real
+  //      sequence: a viewer that renders arrows but always shows the same picture
+  //      passes a DOM-presence assertion and fails here.
+  await cdp.evaluate(`(() => { document.querySelector('.agnes__open').click(); return true })()`)
+  await until(cdp.evaluate, `document.querySelector('.agnes__lightboxImage') !== null`, 'the viewer to reopen')
+  const nav = await cdp.evaluate(
+    `(() => {
+      const prev = document.querySelector('.agnes__lightboxNav--prev');
+      const next = document.querySelector('.agnes__lightboxNav--next');
+      const image = document.querySelector('.agnes__lightboxImage');
+      return JSON.stringify({
+        prev: prev !== null,
+        next: next !== null,
+        src: image ? image.getAttribute('src') : null,
+        counter: document.querySelector('.agnes__lightboxSub')?.textContent ?? null,
+      });
+    })()`,
+  )
+  const navState = JSON.parse(nav)
+  if (!navState.prev || !navState.next) throw new Error('two pictures must offer prev/next controls')
+  if (!String(navState.counter).includes('/ 2')) {
+    throw new Error(`the viewer does not report its position in the sequence: ${String(navState.counter)}`)
+  }
+  await cdp.evaluate(`(() => { document.querySelector('.agnes__lightboxNav--next').click(); return true })()`)
+  const stepped = await until(
+    cdp.evaluate,
+    `(() => {
+      const image = document.querySelector('.agnes__lightboxImage');
+      if (!image) return null;
+      const src = image.getAttribute('src');
+      if (src === ${JSON.stringify(navState.src)}) return null;
+      return JSON.stringify({ src, zoom: document.querySelector('.agnes__lightboxZoom')?.textContent.trim() ?? null });
+    })()`,
+    'the next arrow to change the picture',
+  )
+  const steppedState = JSON.parse(stepped)
+  // A new picture starts fitted: carrying a zoom across a step would show the
+  // next picture cropped to a corner of the previous one.
+  if (steppedState.zoom !== '100%') throw new Error(`stepping did not reset the zoom: ${String(steppedState.zoom)}`)
+  check('browser-viewer-navigates', `next -> ${String(steppedState.src)} at ${String(steppedState.zoom)}`)
+
+  // The arrow keys do the same, and wrap around.
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 })
+  await until(
+    cdp.evaluate,
+    `(() => { const image = document.querySelector('.agnes__lightboxImage'); return image && image.getAttribute('src') !== ${JSON.stringify(steppedState.src)} })()`,
+    'the right arrow key to step the picture',
+  )
+  check('browser-viewer-arrow-keys')
+
+  const fitWidth = await cdp.evaluate(
+    `(() => { const image = document.querySelector('.agnes__lightboxImage'); return image ? Math.round(image.getBoundingClientRect().width) : 0 })()`,
+  )
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: '+', code: 'Equal', windowsVirtualKeyCode: 187, nativeVirtualKeyCode: 187, modifiers: 8 })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: '+', code: 'Equal', windowsVirtualKeyCode: 187, nativeVirtualKeyCode: 187, modifiers: 8 })
+  const keyboardZoom = await until(
+    cdp.evaluate,
+    `(() => {
+      const zoom = document.querySelector('.agnes__lightboxZoom');
+      const image = document.querySelector('.agnes__lightboxImage');
+      if (!zoom || !image) return null;
+      const text = zoom.textContent.trim();
+      if (text === '100%') return null;
+      const width = Math.round(image.getBoundingClientRect().width);
+      if (width <= ${String(fitWidth)}) return null;
+      return JSON.stringify({ zoom: text, width });
+    })()`,
+    'the + key to zoom the picture',
+  )
+  const keyboardState = JSON.parse(keyboardZoom)
+  check('browser-viewer-keyboard-zoom', `${String(fitWidth)}px -> ${String(keyboardState.width)}px at ${String(keyboardState.zoom)}`)
+
+  // Zoom-out is disabled at fit zoom, so it cannot shrink the picture below the
+  // frame it was laid out in.
+  await cdp.evaluate(`(() => { document.querySelector('.agnes__lightboxReset').click(); return true })()`)
+  const outDisabled = await until(
+    cdp.evaluate,
+    `(() => {
+      const button = document.querySelector('.agnes__lightboxZoomOut');
+      if (!button) return null;
+      return button.disabled ? 'disabled' : null;
+    })()`,
+    'zoom-out to disable at fit zoom',
+  )
+  check('browser-viewer-zoom-out-disabled', String(outDisabled))
+
+  // Escape closes it again, and the focus lands back on the control that opened it.
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 })
+  await until(cdp.evaluate, `document.querySelector('.agnes__lightbox') === null`, 'the viewer to close on Escape')
+  const focusReturned = await cdp.evaluate(
+    `(() => { const active = document.activeElement; return active ? active.className : null })()`,
+  )
+  if (focusReturned !== null && !String(focusReturned).includes('agnes__open')) {
+    throw new Error(`closing the viewer did not return focus to the opener: ${String(focusReturned)}`)
+  }
+  check('browser-viewer-focus-returns')
+
   // 16. The display metadata shipped in the package is what the plugin card reads.
   check('display-detail-image', 'docs/DETAIL*.md + docs/preview*.svg present in the packed tarball')
 
@@ -613,7 +973,9 @@ try {
   if (consoleErrors.length > 0) throw new Error(`console errors during the run: ${JSON.stringify(consoleErrors).slice(0, 800)}`)
   check('browser-console-clean')
 
-  await cdp.shot('05-final.png')
+  // The closing shot: the panel after the full viewer round-trip, which is what
+  // proves closing the viewer left the page usable rather than merely present.
+  await cdp.shot('05-panel-after-viewer.png')
 } finally {
   cdp.close()
 }

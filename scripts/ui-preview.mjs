@@ -17,7 +17,7 @@ import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
-import { seedImageGeneration } from './seed-fixture.mjs'
+import { seedTwoImageGenerations } from './seed-fixture.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await readFile(join(repo, 'package.json'), 'utf8'))
@@ -100,8 +100,8 @@ try {
   // deleted with it. Seeding before boot means the panel's first `state` call
   // already sees the record, so the driver never races a late write.
   const dataDir = join(home, 'agnes-studio')
-  const seeded = await seedImageGeneration(dataDir)
-  process.stdout.write(`seeded ${seeded.id} (${String(seeded.asset.bytes)} bytes) into ${dataDir}\n`)
+  const seeded = await seedTwoImageGenerations(dataDir)
+  process.stdout.write(`seeded ${seeded.first.id} + ${seeded.second.id} (${String(seeded.first.asset.bytes)} bytes each) into ${dataDir}\n`)
 
   app = spawn(cli, ['--profile', profile, '--port', '0', '--no-open'], { cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'] })
   let text = ''
@@ -129,8 +129,9 @@ try {
         url: url.replace(/token=[^&]+/, 'token=[redacted]'),
         dataDir,
         // The driver asserts against this exact record, so it must not guess the id.
-        fixtureId: seeded.id,
-        fixtureBytes: seeded.asset.bytes,
+        fixtureId: seeded.first.id,
+        secondFixtureId: seeded.second.id,
+        fixtureBytes: seeded.first.asset.bytes,
       },
       null,
       2,

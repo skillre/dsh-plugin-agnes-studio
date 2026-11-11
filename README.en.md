@@ -4,11 +4,14 @@
 
 Generate images and video with Agnes' free models, from two entry points:
 
-- **Sidebar panel**: click "Agnes Studio" in the DSH left sidebar, write a prompt, tune the
-  parameters, and keep the results in the gallery. "Open original" on a result — or a click on the
-  thumbnail — opens an in-panel viewer: scroll to zoom, drag to pan, click the picture to toggle
-  between fit and 2x, and press Escape or click the backdrop to close. The panel never opens a popup
-  or leaves the app.
+- **Sidebar panel**: click "Agnes Studio" in the DSH left sidebar. The composer sits on the left
+  (prompt, model, resolution, aspect ratio) and the result gallery on the right; each pane scrolls on
+  its own, and the generate button is pinned to the foot of the composer so it is always one click
+  away. Small mutually-exclusive sets (resolution, video mode) render as a segmented control; larger
+  sets (aspect ratios, durations) as chips that draw their own proportions. "View full size" on a
+  result — or a click on the thumbnail — opens an in-panel viewer: scroll to zoom, drag to pan,
+  double-click to zoom, Escape or a backdrop click to close, and arrow keys to step through the
+  gallery. The panel never opens a popup or leaves the app.
 - **Session tools**: just say "draw a …" or "generate a … video". The model calls `agnes_image` /
   `agnes_video`, and an image arrives in the conversation as a real DSH image block.
 
@@ -117,17 +120,23 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 137 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 145 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering,
   image-viewer interaction, and the SHIPPED client bundle (loaded and rendered through the real loader
   envelope).
 - Packed tarball installed into a disposable isolated profile: `--dump-config` composition, bounded
   real startup, authenticated `/api` calls, a real image generation downloaded through the media
   route, records and files surviving a restart, and the file disappearing after deletion.
-- Real headless Chrome driving the DSH Web app: sidebar entry, panel render, model-derived controls on
-  both capability tabs, Flash narrowing the resolution list, the gallery card, and the image viewer
-  (spans the viewport, zoom changes the measured layout, closes on Escape and on a backdrop click, and
-  does not close when the picture is clicked) — 21 checks. Evidence is in `docs/evidence/`.
+- Real headless Chrome driving the DSH Web app — 29 checks: sidebar entry, panel render, the
+  two-pane layout (measured: both panes side by side, the composer not spanning the panel), the
+  model-derived controls **and their shape** (four resolutions are a segmented control, eight ratios
+  are chips), Flash narrowing the resolution list, the generate button reachable without scrolling,
+  the gallery card with its uniform 4:3 thumbnail crop, the category filter actually changing the
+  results, both themes following the host (measured surface and text colours), and the image viewer
+  (spans the viewport, zoom changes the measured layout, closes on Escape and on a backdrop click,
+  does not close when the picture is clicked, steps through the gallery with the arrow keys and resets
+  the zoom per picture, and returns focus to the control that opened it). Evidence is in
+  `docs/evidence/`.
 
 ## Development
 

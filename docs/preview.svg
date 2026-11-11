@@ -1,76 +1,140 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300" width="640" height="300" role="img" aria-label="Agnes Studio preview">
-  <!-- Detail banner: the sidebar entry on the left, the studio panel on the
-       right. Drawn with flat shapes only so it survives the whiteboard parser
-       and stays readable at the rendered 640x300 size. -->
+  <!-- Detail banner: the sidebar entry on the left, the two-pane studio panel on
+       the right. Drawn with flat shapes only so it survives the whiteboard
+       parser and stays readable at the rendered 640x300 size. The panel mirrors
+       the shipped layout: composer on the left, results grid on the right, and
+       the accent-filled primary action pinned at the foot of the composer. -->
   <defs>
-    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#111827"/>
-      <stop offset="1" stop-color="#1f2937"/>
-    </linearGradient>
     <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#4f46e5"/>
       <stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="0.55" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#ec4899"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#a3e635"/>
     </linearGradient>
   </defs>
 
   <rect x="0" y="0" width="640" height="300" fill="#0b1220"/>
 
   <!-- Left: the sidebar rail with the new entry highlighted -->
-  <rect x="24" y="24" width="96" height="252" rx="16" fill="#151d2e"/>
-  <rect x="40" y="44" width="64" height="10" rx="5" fill="#2b3648"/>
-  <rect x="40" y="70" width="46" height="8" rx="4" fill="#232d3d"/>
-  <rect x="36" y="92" width="72" height="34" rx="10" fill="url(#accent)"/>
-  <rect x="46" y="103" width="12" height="12" rx="3" fill="#ffffff"/>
-  <rect x="64" y="104" width="34" height="4" rx="2" fill="#ffffff" fill-opacity="0.9"/>
-  <rect x="64" y="112" width="24" height="4" rx="2" fill="#ffffff" fill-opacity="0.65"/>
-  <rect x="40" y="140" width="56" height="8" rx="4" fill="#232d3d"/>
-  <rect x="40" y="158" width="42" height="8" rx="4" fill="#232d3d"/>
+  <rect x="20" y="20" width="92" height="260" rx="16" fill="#151d2e"/>
+  <rect x="34" y="38" width="64" height="10" rx="5" fill="#2b3648"/>
+  <rect x="34" y="62" width="46" height="8" rx="4" fill="#232d3d"/>
+  <rect x="30" y="84" width="72" height="34" rx="10" fill="url(#accent)"/>
+  <rect x="40" y="95" width="12" height="12" rx="3" fill="#ffffff"/>
+  <rect x="58" y="96" width="34" height="4" rx="2" fill="#ffffff" fill-opacity="0.92"/>
+  <rect x="58" y="104" width="24" height="4" rx="2" fill="#ffffff" fill-opacity="0.66"/>
+  <rect x="34" y="134" width="56" height="8" rx="4" fill="#232d3d"/>
+  <rect x="34" y="152" width="42" height="8" rx="4" fill="#232d3d"/>
 
   <!-- Right: the studio panel -->
-  <rect x="136" y="24" width="480" height="252" rx="16" fill="url(#panel)"/>
+  <rect x="124" y="20" width="496" height="260" rx="16" fill="#111827"/>
 
-  <!-- Panel header and the two capability tabs -->
-  <text x="160" y="58" font-family="Noto Sans SC, sans-serif" font-size="17" font-weight="700" fill="#f8fafc">Agnes Studio</text>
-  <rect x="160" y="70" width="76" height="26" rx="13" fill="url(#accent)"/>
-  <text x="176" y="88" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#ffffff">Images</text>
-  <rect x="244" y="70" width="72" height="26" rx="13" fill="#26334a"/>
-  <text x="258" y="88" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#c7d2e4">Video</text>
+  <!-- Header: brand mark, title, status pill -->
+  <rect x="142" y="38" width="26" height="26" rx="9" fill="url(#accent)"/>
+  <path d="M155 45.5 L157 51 L162.5 53 L157 55 L155 60.5 L153 55 L147.5 53 L153 51 Z" fill="#ffffff"/>
+  <text x="176" y="50" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="13" font-weight="700" fill="#f8fafc">Agnes Studio</text>
+  <text x="176" y="62" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="9" fill="#8b97ad">Agnes' free models, for stills and video.</text>
+  <rect x="536" y="40" width="66" height="18" rx="9" fill="#1b2436"/>
+  <circle cx="547" cy="49" r="3" fill="#22c55e"/>
+  <text x="554" y="52" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="8" fill="#c7d2e4">Ready</text>
 
-  <!-- Prompt field -->
-  <rect x="160" y="110" width="288" height="46" rx="10" fill="#0f1726"/>
-  <rect x="174" y="122" width="196" height="7" rx="3.5" fill="#3d4a63"/>
-  <rect x="174" y="137" width="140" height="7" rx="3.5" fill="#2c374b"/>
+  <!-- Composer pane -->
+  <rect x="142" y="74" width="186" height="192" rx="12" fill="#161e2e" stroke="#232d3d"/>
+  <rect x="150" y="82" width="170" height="20" rx="7" fill="#0f1726"/>
+  <rect x="154" y="88" width="78" height="9" rx="4.5" fill="#1e293b"/>
+  <text x="242" y="96" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="7.5" fill="#a5b4cc">Images</text>
+  <text x="286" y="96" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="7.5" fill="#64748b">Video</text>
 
-  <!-- Parameter row -->
-  <rect x="160" y="166" width="88" height="24" rx="7" fill="#1b2436"/>
-  <text x="170" y="182" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#9fb0c9">2.5 Flash</text>
-  <rect x="256" y="166" width="60" height="24" rx="7" fill="#1b2436"/>
-  <text x="266" y="182" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#9fb0c9">2K</text>
-  <rect x="324" y="166" width="60" height="24" rx="7" fill="#1b2436"/>
-  <text x="334" y="182" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#9fb0c9">16:9</text>
-  <rect x="392" y="166" width="56" height="24" rx="12" fill="#0ea5e9"/>
-  <text x="402" y="182" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#04121f">Generate</text>
+  <!-- Prompt box with its counter -->
+  <rect x="150" y="110" width="170" height="46" rx="8" fill="#0f1726" stroke="#2b3648"/>
+  <rect x="158" y="120" width="132" height="5" rx="2.5" fill="#3d4a63"/>
+  <rect x="158" y="131" width="104" height="5" rx="2.5" fill="#2c374b"/>
+  <text x="300" y="150" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6.5" fill="#64748b">0/4000</text>
 
-  <!-- Result gallery: two generated tiles -->
-  <rect x="160" y="204" width="88" height="56" rx="8" fill="#2a3a56"/>
-  <circle cx="186" cy="226" r="7" fill="#f59e0b"/>
-  <path d="M168 252 L186 234 L200 248 L212 238 L240 258" fill="none" stroke="#7f93b5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="258" y="204" width="88" height="56" rx="8" fill="#243449"/>
-  <rect x="272" y="220" width="60" height="8" rx="4" fill="#41546f"/>
-  <rect x="272" y="234" width="44" height="8" rx="4" fill="#33455d"/>
-  <path d="M330 240 L338 234 L346 240 L338 246 Z" fill="#a5b4cc"/>
+  <!-- Example chips -->
+  <rect x="150" y="162" width="52" height="12" rx="6" fill="#161e2e" stroke="#2b3648"/>
+  <rect x="206" y="162" width="46" height="12" rx="6" fill="#161e2e" stroke="#2b3648"/>
+  <rect x="256" y="162" width="58" height="12" rx="6" fill="#161e2e" stroke="#2b3648"/>
 
-  <!-- Right column: configuration state and the model note -->
-  <rect x="464" y="110" width="128" height="98" rx="10" fill="#0f1726"/>
-  <circle cx="480" cy="130" r="5" fill="#22c55e"/>
-  <text x="492" y="134" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#c7d2e4">Key ready</text>
-  <rect x="478" y="148" width="96" height="6" rx="3" fill="#2c374b"/>
-  <rect x="478" y="162" width="76" height="6" rx="3" fill="#2c374b"/>
-  <rect x="478" y="176" width="86" height="6" rx="3" fill="#2c374b"/>
+  <!-- Model select -->
+  <rect x="150" y="182" width="170" height="17" rx="6" fill="#0f1726" stroke="#2b3648"/>
+  <text x="158" y="194" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="8" fill="#c7d2e4">Agnes Image 2.5 Flash</text>
+  <path d="M306 189 l4 4 l4 -4" fill="none" stroke="#64748b" stroke-width="1.4" stroke-linecap="round"/>
 
-  <text x="464" y="232" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#8fa3bf">agnes-image-2.5-flash</text>
-  <text x="464" y="250" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#6b7f9b">agnes-video-2.5</text>
+  <!-- Resolution: segmented control (four visible options) -->
+  <rect x="150" y="206" width="170" height="18" rx="6" fill="#0f1726" stroke="#232d3d"/>
+  <rect x="152" y="208" width="41" height="14" rx="4" fill="#1e293b"/>
+  <text x="166" y="218" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="7" fill="#f8fafc">1K</text>
+  <text x="212" y="218" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="7" fill="#64748b">2K</text>
+  <text x="252" y="218" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="7" fill="#64748b">3K</text>
+  <text x="292" y="218" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="7" fill="#64748b">4K</text>
 
-  <!-- Footer hint -->
-  <text x="160" y="266" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#64748b">Sidebar entry + in-session tools: agnes_image / agnes_video</text>
+  <!-- Ratio chips with their proportional glyphs -->
+  <rect x="150" y="230" width="34" height="14" rx="7" fill="#1e1b4b" stroke="#4f46e5"/>
+  <rect x="157" y="235" width="7" height="7" rx="1" fill="none" stroke="#818cf8" stroke-width="1.2"/>
+  <text x="168" y="240" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6.5" fill="#a5b4fc">1:1</text>
+  <rect x="188" y="230" width="34" height="14" rx="7" fill="#0f1726" stroke="#2b3648"/>
+  <rect x="195" y="234" width="6" height="8" rx="1" fill="none" stroke="#64748b" stroke-width="1.2"/>
+  <text x="206" y="240" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6.5" fill="#94a3b8">3:4</text>
+  <rect x="226" y="230" width="34" height="14" rx="7" fill="#0f1726" stroke="#2b3648"/>
+  <rect x="233" y="235" width="8" height="6" rx="1" fill="none" stroke="#64748b" stroke-width="1.2"/>
+  <text x="246" y="240" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6.5" fill="#94a3b8">4:3</text>
+
+  <!-- The pinned primary action -->
+  <rect x="150" y="248" width="170" height="17" rx="7" fill="url(#accent)"/>
+  <text x="212" y="259" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="8" font-weight="700" fill="#ffffff">Generate image</text>
+
+  <!-- Gallery pane: sticky head, then two result cards in a grid -->
+  <text x="342" y="86" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="10" font-weight="700" fill="#f8fafc">History</text>
+  <rect x="382" y="78" width="22" height="11" rx="5.5" fill="#1b2436" stroke="#2b3648"/>
+  <text x="387" y="86" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6.5" fill="#94a3b8">2</text>
+  <rect x="474" y="78" width="34" height="12" rx="6" fill="#0f1726" stroke="#2b3648"/>
+  <rect x="477" y="80" width="17" height="8" rx="4" fill="#1e293b"/>
+  <text x="481" y="86" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#f8fafc">All</text>
+  <text x="498" y="86" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#64748b">2</text>
+  <text x="516" y="86" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#64748b">0</text>
+
+  <!-- Card 1: a sky/sea gradient "render" in a uniform 4:3 frame -->
+  <rect x="342" y="98" width="126" height="98" rx="9" fill="#1b2436" stroke="#2b3648"/>
+  <rect x="342" y="98" width="126" height="66" rx="9" fill="url(#sky)"/>
+  <circle cx="405" cy="131" r="21" fill="none" stroke="#fb923c" stroke-width="4"/>
+  <text x="350" y="176" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="7" fill="#e2e8f0">Sunrise over a snow ridge</text>
+  <text x="350" y="185" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#64748b">2.5-flash · 1024×1024</text>
+  <path d="M350 189 h110" stroke="#2b3648" stroke-width="0.8"/>
+  <text x="350" y="192" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#94a3b8">View full size</text>
+
+  <!-- Card 2: a second render, same frame shape -->
+  <rect x="476" y="98" width="126" height="98" rx="9" fill="#1b2436" stroke="#2b3648"/>
+  <rect x="476" y="98" width="126" height="66" rx="9" fill="url(#sea)"/>
+  <circle cx="539" cy="131" r="21" fill="none" stroke="#fb923c" stroke-width="4"/>
+  <text x="484" y="176" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="7" fill="#e2e8f0">Ceramic cup, soft side light</text>
+  <text x="484" y="185" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#64748b">2.5-flash · 1024×1024</text>
+  <path d="M484 189 h110" stroke="#2b3648" stroke-width="0.8"/>
+  <text x="484" y="192" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#94a3b8">View full size</text>
+
+  <!-- Lightbox strip: the in-panel viewer, which is what replaced the dead
+       new-window link. The bar shows the zoom readout and the control cluster. -->
+  <rect x="342" y="204" width="260" height="62" rx="9" fill="#07090d"/>
+  <rect x="342" y="204" width="260" height="16" rx="8" fill="#141922"/>
+  <text x="350" y="215" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6.5" fill="#e2e8f0">Sunrise over a snow ridge, long lens</text>
+  <rect x="516" y="207" width="34" height="10" rx="4" fill="#ffffff" fill-opacity="0.12"/>
+  <text x="522" y="215" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#ffffff">100%</text>
+  <rect x="554" y="207" width="26" height="10" rx="4" fill="#ffffff" fill-opacity="0.12"/>
+  <text x="559" y="215" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#ffffff">Save</text>
+  <rect x="362" y="226" width="72" height="26" rx="3" fill="url(#sky)"/>
+  <circle cx="398" cy="239" r="9" fill="none" stroke="#fb923c" stroke-width="2.4"/>
+  <path d="M352 233 l4 -4 M352 233 l4 4" fill="none" stroke="#ffffff" stroke-opacity="0.7" stroke-width="1.4"/>
+  <path d="M612 233 l-4 -4 M612 233 l-4 4" fill="none" stroke="#ffffff" stroke-opacity="0.7" stroke-width="1.4"/>
+  <text x="452" y="240" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#94a3b8">Scroll to zoom · drag to pan</text>
+  <text x="452" y="250" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="6" fill="#64748b">Arrows to switch</text>
+
+  <!-- Footer: the session tools remain the other way in -->
+  <text x="142" y="278" font-family="system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif" font-size="8" fill="#475569">Sidebar panel + in-session tools: agnes_image / agnes_video</text>
 </svg>
