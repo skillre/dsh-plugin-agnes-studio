@@ -95,11 +95,6 @@ type Tab = MediaKind
 /** Which records the gallery shows. */
 type Filter = 'all' | 'image' | 'video'
 
-/** The in-flight generation, kept so the panel can describe it while it runs. */
-interface Busy {
-  readonly kind: MediaKind
-}
-
 /** The image form draft. */
 interface ImageDraft {
   prompt: string
@@ -558,9 +553,39 @@ function PromptBox(props: {
   disabled: boolean
   examples: readonly string[]
   onChange: (value: string) => void
+  /** Whether a key is configured; optimization needs the same upstream call. */
+  configured: boolean
+  /** Run the optimizer; resolves with the rewritten prompt. */
+  onOptimize: () => Promise<string>
 }): JSX.Element {
-  const { t, value, disabled, examples, onChange } = props
+  const { t, value, disabled, examples, onChange, configured, onOptimize } = props
   const nearLimit = value.length > LIMITS.prompt * 0.9
+  const [optimizing, setOptimizing] = useState(false)
+  const [optimizedFrom, setOptimizedFrom] = useState<string | null>(null)
+  const [optimizeError, setOptimizeError] = useState<string | null>(null)
+
+  /**
+   * Rewrite the prompt, keeping the original so the edit is reversible.
+   *
+   * An optimizer that silently replaces the user's words is worse than none, so
+   * the pre-optimization text is held until the user accepts it by editing.
+   */
+  const optimize = async (): Promise<void> => {
+    if (value.trim() === '' || optimizing) return
+    setOptimizing(true)
+    setOptimizeError(null)
+    const previous = value
+    try {
+      const improved = await onOptimize()
+      onChange(improved)
+      setOptimizedFrom(previous)
+    } catch {
+      setOptimizeError(t('error.optimizeFailed'))
+    } finally {
+      setOptimizing(false)
+    }
+  }
+
   return (
     <div className="agnes__form">
       <div className="agnes__label">
@@ -570,18 +595,54 @@ function PromptBox(props: {
             className="agnes__prompt"
             value={value}
             maxLength={LIMITS.prompt}
-            disabled={disabled}
+            disabled={disabled || optimizing}
             aria-label={t('form.prompt')}
             placeholder={t('form.promptPlaceholder')}
-            onChange={(event) => onChange(event.target.value)}
+            onChange={(event) => {
+              // Editing after an optimization is an acceptance of the rewrite, so
+              // the offers to undo or re-run disappear.
+              if (optimizedFrom !== null) setOptimizedFrom(null)
+              onChange(event.target.value)
+            }}
           />
           <div className="agnes__promptFoot">
+            <button
+              type="button"
+              className="agnes__optimize"
+              disabled={disabled || optimizing || !configured || value.trim() === ''}
+              title={t('form.optimizeHint')}
+              onClick={() => void optimize()}
+            >
+              <IconSpark />
+              {optimizing ? t('form.optimizing') : t('form.optimize')}
+            </button>
+            {optimizedFrom !== null ? (
+              <>
+                <span className="agnes__optimizedTag">{t('form.optimized')}</span>
+                <button
+                  type="button"
+                  className="agnes__undo"
+                  disabled={optimizing}
+                  onClick={() => {
+                    onChange(optimizedFrom)
+                    setOptimizedFrom(null)
+                  }}
+                >
+                  {t('form.optimizeUndo')}
+                </button>
+              </>
+            ) : null}
             <span className="agnes__counter" data-near={nearLimit ? 'true' : 'false'} style={nearLimit ? { color: 'var(--a-warn)' } : undefined}>
               {value.length} / {LIMITS.prompt}
             </span>
           </div>
         </div>
       </div>
+      {optimizeError === null ? null : (
+        <span className="agnes__hint" role="alert">
+          {optimizeError}
+        </span>
+      )}
       <div className="agnes__examples">
         <span className="agnes__hint">{t('form.examples')}</span>
         {examples.map((example, index) => (
@@ -654,6 +715,19 @@ function ReferenceList(props: {
     </div>
   )
 }
+
+// ---------------------------------------------------------------------------
+// Polling
+// ---------------------------------------------------------------------------
+
+/**
+ * How often the panel re-reads the Host while a job is in flight.
+ *
+ * The Host is the authority on running work, so the panel must ask. 1.5s is fast
+ * enough that a finishing image feels immediate and slow enough that a 15-minute
+ * video costs ~600 small requests rather than thousands.
+ */
+const POLL_MS = 1500
 
 // ---------------------------------------------------------------------------
 // Image viewer
@@ -1046,20 +1120,38 @@ function ImageViewer(props: {
 // Gallery
 // ---------------------------------------------------------------------------
 
-/** The placeholder card shown while a request runs, so the grid acknowledges it. */
-function PendingCard(props: { t: Translate; kind: MediaKind }): JSX.Element {
+/**
+ * The placeholder card shown for one running job.
+ *
+ * Driven by the Host's in-flight list, so it also appears when the user comes
+ * back to the studio while a job is still rendering elsewhere.
+ */
+function PendingCard(props: {
+  t: Translate
+  kind: MediaKind
+  retryOf?: string
+  onCancel: () => void
+}): JSX.Element {
+  const { t, kind, retryOf, onCancel } = props
   return (
-    <article className="agnes__card agnes__card--pending" aria-hidden="true">
+    <article className="agnes__card agnes__card--pending">
       <div className="agnes__thumbFrame">
         <div className="agnes__pendingShine" />
         <span className="agnes__pendingBadge">
           <span className="agnes__spinner" />
-          {props.kind === 'image' ? props.t('status.generatingImage') : props.t('status.generatingVideo')}
+          {kind === 'image' ? t('status.generatingImage') : t('status.generatingVideo')}
         </span>
       </div>
       <div className="agnes__cardBody">
         <span className="agnes__pendingLine" style={{ width: '72%' }} />
         <span className="agnes__pendingLine" style={{ width: '46%' }} />
+        <div className="agnes__cardActions">
+          <span className="agnes__hint">{retryOf === undefined ? t('hint.background') : t('hint.retrying')}</span>
+          <span className="agnes__spacer" />
+          <button type="button" className="agnes__open" onClick={onCancel}>
+            {t('action.cancelJob')}
+          </button>
+        </div>
       </div>
     </article>
   )
@@ -1186,8 +1278,8 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   const [tab, setTab] = useState<Tab>('image')
   const [state, setState] = useState<StudioState | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [busy, setBusy] = useState<Busy | null>(null)
-  const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<{ message: string; retryable: boolean; recordId?: string } | null>(null)
   const [filter, setFilter] = useState<Filter>('all')
   const [imageDraft, setImageDraft] = useState<ImageDraft>(initialImageDraft)
   const [videoDraft, setVideoDraft] = useState<VideoDraft>(initialVideoDraft)
@@ -1201,7 +1293,7 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
    * leaving it on a stale picture.
    */
   const [viewingId, setViewingId] = useState<string | null>(null)
-  // The last submitted request, so "retry" resends exactly what failed.
+  // The last submitted request, so the error line's retry can resend it.
   const lastRequest = useRef<GenerationRequest | null>(null)
   /** The element that opened the viewer, so closing can return focus to it. */
   const openerRef = useRef<Element | null>(null)
@@ -1214,11 +1306,21 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
     }
   }, [])
 
-  /** Load the initial state once. */
+  /** Read the state without the model-catalog probe (that costs an upstream call). */
+  const refresh = useCallback(async () => {
+    const next = await api.state()
+    if (mounted.current) {
+      setState(next)
+      setLoadError(null)
+    }
+    return next
+  }, [api])
+
+  /** Load once, including the model catalog the header reports. */
   useEffect(() => {
     const controller = new AbortController()
     api
-      .state(controller.signal)
+      .state({ probeModels: true, signal: controller.signal })
       .then((next) => {
         if (mounted.current) setState(next)
       })
@@ -1228,29 +1330,91 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
     return () => controller.abort()
   }, [api, t])
 
-  /** Run one request and reconcile the returned state. */
+  /**
+   * Keep polling while the Host has work in flight.
+   *
+   * This is the whole point of Host-owned jobs: the panel is a VIEW of remote
+   * work, so coming back after switching away must show what is still running.
+   * Polling only runs while there is something to observe — an idle panel costs
+   * nothing — and stops as soon as the last job settles, whose stored record
+   * arrives in the same response.
+   */
+  const running = state?.running ?? []
+  const hasRunning = running.length > 0
+  useEffect(() => {
+    if (!hasRunning) return
+    let cancelled = false
+    const timer = setInterval(() => {
+      if (cancelled) return
+      void refresh().catch(() => {
+        // A transient poll failure keeps the last known state; the next tick
+        // retries, and the records are still on the Host either way.
+      })
+    }, POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [hasRunning, refresh])
+
+  /**
+   * Submit one generation and let the Host run it in the background.
+   *
+   * Deliberately not awaited to completion: the Host answers as soon as the job
+   * is registered, and the panel learns the outcome by polling. That is what
+   * makes the work survive the user leaving the studio.
+   */
   const run = useCallback(
     async (request: GenerationRequest) => {
       lastRequest.current = request
-      setBusy({ kind: request.kind })
+      setSubmitting(true)
       setError(null)
       try {
-        const result = await api.generate(request)
+        const next = await api.start(request)
         if (!mounted.current) return
-        setState(result.state)
+        setState(next)
       } catch (cause) {
         if (!mounted.current) return
-        setError({ message: messageFor(t, cause), retryable: isRetryable(cause) })
-        // A failed attempt may still have refreshed the history (a retryable
-        // failure is recorded), so re-read the state rather than assume.
-        try {
-          const next = await api.state()
-          if (mounted.current) setState(next)
-        } catch {
-          // Keep the error line; the stale history is better than a blank panel.
-        }
+        const recordId = cause instanceof ActionError ? cause.details['recordId'] : undefined
+        setError({
+          message: messageFor(t, cause),
+          retryable: isRetryable(cause),
+          ...(typeof recordId === 'string' ? { recordId } : {}),
+        })
       } finally {
-        if (mounted.current) setBusy(null)
+        if (mounted.current) setSubmitting(false)
+      }
+    },
+    [api, t],
+  )
+
+  /** Retry one stored failure from its own stored request. */
+  const retryRecord = useCallback(
+    async (generation: Generation) => {
+      setSubmitting(true)
+      setError(null)
+      try {
+        const next = await api.retry(generation.id)
+        if (!mounted.current) return
+        setState(next)
+      } catch (cause) {
+        if (!mounted.current) return
+        setError({ message: messageFor(t, cause), retryable: false })
+      } finally {
+        if (mounted.current) setSubmitting(false)
+      }
+    },
+    [api, t],
+  )
+
+  /** Cancel one running job. */
+  const cancelJob = useCallback(
+    async (id: string) => {
+      try {
+        const next = await api.cancel(id)
+        if (mounted.current) setState(next)
+      } catch (cause) {
+        if (mounted.current) setError({ message: messageFor(t, cause), retryable: false })
       }
     },
     [api, t],
@@ -1309,12 +1473,6 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
     })
   }, [run, t, videoDraft])
 
-  /** Retry the last identical request. */
-  const retry = useCallback(() => {
-    const request = lastRequest.current
-    if (request !== null) void run(request)
-  }, [run])
-
   const deleteOne = useCallback(
     async (id: string) => {
       try {
@@ -1355,7 +1513,10 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
   )
   const imageCount = generations.filter((generation) => generation.kind === 'image').length
   const videoCount = generations.length - imageCount
-  const disabled = busy !== null
+  // A running job blocks a second submit: the upstream video queue is shared and
+  // deepening it is the one thing the panel can guarantee it does not do. Leaving
+  // the studio does NOT clear this, because the job is still real.
+  const disabled = submitting || running.length > 0
 
   /** The image records the viewer can step through, in gallery order. */
   const viewable = useMemo(
@@ -1505,7 +1666,15 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
                 <span className="agnes__errorBody">{error.message}</span>
                 <span className="agnes__actions">
                   {error.retryable ? (
-                    <button type="button" className="agnes__button" disabled={disabled} onClick={retry}>
+                    <button
+                      type="button"
+                      className="agnes__button"
+                      disabled={disabled}
+                      onClick={() => {
+                        const request = lastRequest.current
+                        if (request !== null) void run(request)
+                      }}
+                    >
                       <IconReset />
                       {t('gallery.retry')}
                     </button>
@@ -1518,17 +1687,28 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
             </div>
           ) : null}
 
-          {busy !== null ? (
-            <div className="agnes__busy" role="status" aria-live="polite">
+          {running.map((job) => (
+            <div className="agnes__busy" role="status" aria-live="polite" key={job.id}>
               <span className="agnes__busyRow">
                 <span className="agnes__spinner" aria-hidden="true" />
-                <span>{busy.kind === 'image' ? t('status.generatingImage') : t('status.generatingVideo')}</span>
+                <span>{job.kind === 'image' ? t('status.generatingImage') : t('status.generatingVideo')}</span>
+                <span className="agnes__spacer" />
+                {/* Leaving the studio does not stop the job, so the panel must
+                    also offer the one action that does. */}
+                <button
+                  type="button"
+                  className="agnes__button agnes__button--ghost agnes__cancelJob"
+                  onClick={() => void cancelJob(job.id)}
+                >
+                  {t('action.cancelJob')}
+                </button>
               </span>
               <span className="agnes__busyTrack" aria-hidden="true">
                 <span className="agnes__busyBar" />
               </span>
+              <span className="agnes__busyHint">{t('hint.background')}</span>
             </div>
-          ) : null}
+          ))}
 
           {tab === 'image' ? (
             <div className="agnes__form">
@@ -1537,6 +1717,8 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
                 value={imageDraft.prompt}
                 disabled={disabled}
                 examples={examples}
+                configured={state?.configured === true}
+                onOptimize={() => api.optimize(imageDraft.prompt, 'image')}
                 onChange={(prompt) => setImageDraft({ ...imageDraft, prompt })}
               />
 
@@ -1590,6 +1772,8 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
                 value={videoDraft.prompt}
                 disabled={disabled}
                 examples={examples}
+                configured={state?.configured === true}
+                onOptimize={() => api.optimize(videoDraft.prompt, 'video')}
                 onChange={(prompt) => setVideoDraft({ ...videoDraft, prompt })}
               />
 
@@ -1768,7 +1952,7 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
               </span>
               <span className="agnes__emptyTitle">{loadError ?? t('gallery.loading')}</span>
             </div>
-          ) : filtered.length === 0 && busy === null ? (
+          ) : filtered.length === 0 && running.length === 0 ? (
             <div className="agnes__empty">
               <span className="agnes__emptyIcon">
                 <IconFrame />
@@ -1778,7 +1962,17 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
             </div>
           ) : (
             <div className="agnes__grid">
-              {busy !== null ? <PendingCard t={t} kind={busy.kind} /> : null}
+              {running
+                .filter((job) => filter === 'all' || job.kind === filter)
+                .map((job) => (
+                  <PendingCard
+                    key={job.id}
+                    t={t}
+                    kind={job.kind}
+                    {...(job.retryOf === undefined ? {} : { retryOf: job.retryOf })}
+                    onCancel={() => void cancelJob(job.id)}
+                  />
+                ))}
               {filtered.map((generation) => (
                 <GenerationCard
                   key={generation.id}
@@ -1786,7 +1980,7 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
                   generation={generation}
                   disabled={disabled}
                   onDelete={(id) => void deleteOne(id)}
-                  onRetry={() => retry()}
+                  onRetry={(generation) => void retryRecord(generation)}
                   onOpen={openViewer}
                 />
               ))}

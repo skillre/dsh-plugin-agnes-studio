@@ -68,8 +68,16 @@ export const STUDIO_CSS = `
   height: 100%;
   min-height: 0;
   box-sizing: border-box;
-  max-width: 1480px;
-  margin: 0 auto;
+  /* Fill the centre column instead of shrink-wrapping to its content.
+     The parent is a flex row, so without this the page sized itself to the
+     composer + gallery minimum (953px inside a 1232px column) and "margin: 0
+     auto" then centred that narrower box — leaving a measured 139.5px dead gap
+     on the left while the right side had one too. "width: 100%" plus no auto
+     margin pins the workspace to the left edge and hands the whole remaining
+     width to the gallery. */
+  width: 100%;
+  max-width: none;
+  margin: 0;
   padding: 16px 22px 14px;
   color: var(--a-fg);
   font-size: 13px;
@@ -322,6 +330,58 @@ export const STUDIO_CSS = `
   padding: 2px 9px 6px;
   min-height: 20px;
 }
+/* Prompt optimizer: a quiet tertiary action inside the prompt box, so it never
+   competes with the primary Generate button below. */
+.agnes__optimize {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--a-border);
+  border-radius: var(--a-radius-sm);
+  background: var(--a-surface);
+  color: var(--a-fg-2);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+.agnes__optimize:hover:not(:disabled) {
+  border-color: var(--a-accent-line);
+  color: var(--a-accent);
+  background: var(--a-accent-soft);
+}
+.agnes__optimize:disabled { opacity: 0.5; cursor: default; }
+.agnes__optimize:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 1px; }
+
+.agnes__optimizedTag {
+  flex: none;
+  max-width: 15ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--a-accent);
+}
+.agnes__undo {
+  appearance: none;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--a-fg-3);
+  font: inherit;
+  font-size: 10.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.agnes__undo:hover { color: var(--a-fg); }
+
 .agnes__counter {
   margin-left: auto;
   flex: none;
@@ -644,6 +704,8 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   background: var(--a-accent-soft);
 }
 .agnes__busyRow { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--a-fg); }
+.agnes__cancelJob { height: 20px; padding: 0 8px; font-size: 10.5px; }
+.agnes__busyHint { font-size: 10.5px; color: var(--a-fg-3); }
 .agnes__busyTrack {
   position: relative;
   height: 2px;

@@ -239,7 +239,7 @@ try {
     // 2. An invalid request must be refused by the plugin, inside the envelope,
     //    without ever reaching Agnes.
     const refused = await rpcExpectError(origin, cookie, {
-      action: 'generate',
+      action: 'start',
       request: { kind: 'image', prompt: 'x', model: 'agnes-image-2.5-flash', size: '8K', ratio: '1:1', references: [] },
     })
     assert.equal(refused.code, 'agnes-studio/bad-request', `an unsupported size must be refused at the route, got ${refused.code}`)
@@ -251,7 +251,7 @@ try {
     //    the expected code depends on the configuration state, and both are real
     //    refusals that never reach Agnes.
     const badModel = await rpcExpectError(origin, cookie, {
-      action: 'generate',
+      action: 'start',
       request: { kind: 'image', prompt: 'x', model: 'agnes-video-2.5', size: '1K', ratio: '1:1', references: [] },
     })
     const expectedModelCode = state.configured === true ? 'agnes-studio/invalid-model' : 'agnes-studio/not-configured'
@@ -304,7 +304,7 @@ try {
       // fails. A plugin-owned refusal is NOT retried — that would hide a real
       // contract regression.
       const payload = {
-        action: 'generate',
+        action: 'start',
         request: {
           kind: 'image',
           prompt: 'A single ripe red apple on a plain white table, soft studio light, product photo',
@@ -314,16 +314,46 @@ try {
           references: [],
         },
       }
-      let generated = await rpc(origin, cookie, payload, 420000)
+
+      /**
+       * Start a background job and poll it to settlement.
+       *
+       * The route answers as soon as the job is registered now, so there is no
+       * long request to await: the outcome arrives through `state` as either a
+       * stored record or a stored failure. Polling also proves the in-flight
+       * contract the panel depends on — a started job must be reported in
+       * `running` before it settles, or coming back to the studio would show
+       * nothing.
+       */
+      const generateOnce = async () => {
+        const started = await rpc(origin, cookie, payload, 200)
+        if (started.ok === false) return started
+        const jobId = started.value.state.running?.[0]?.id
+        assert.ok(jobId, 'a started job must be reported in state.running')
+        let sawRunning = false
+        for (let tick = 0; tick < 400; tick += 1) {
+          const current = await rpc(origin, cookie, { action: 'state' }, 200)
+          if (current.ok === false) return current
+          if (current.value.state.running.some((job) => job.id === jobId)) { sawRunning = true; await delay(1000); continue }
+          const created = current.value.state.generations.find((entry) => entry.id === jobId)
+          if (created === undefined) { await delay(1000); continue }
+          return { ok: true, value: { state: current.value.state, created, sawRunning } }
+        }
+        return { ok: false, error: { code: 'client-timeout', message: 'the job never settled' } }
+      }
+
+      let generated = await generateOnce()
       for (let attempt = 1; attempt < 3 && generated.ok === false; attempt += 1) {
         const retryable = /download-failed|upstream-failed|timeout|queue-full|rate-limited/.test(generated.error?.code ?? '')
         if (!retryable) break
         report.checks.push(`retry-generate: ${generated.error.code} -> attempt ${attempt + 1}`)
         await delay(3000)
-        generated = await rpc(origin, cookie, payload, 420000)
+        generated = await generateOnce()
       }
       assert.equal(generated.ok, true, `image generation failed: ${JSON.stringify(generated.error)}`)
       const created = generated.value.created
+      assert.equal(generated.value.sawRunning, true, 'the job was never observed running')
+      checks.push('api-job-reported-running')
       assert.equal(created.status, 'succeeded')
       assert.ok(created.asset?.src, 'a generated image must carry a media src')
       assert.ok(created.asset.bytes > 1000, `generated image is suspiciously small: ${created.asset.bytes} bytes`)
@@ -389,7 +419,7 @@ try {
       // The refusal path is still real and must be verified: an unconfigured
       // profile reports not-configured rather than an empty bearer token.
       const notConfigured = await rpcExpectError(origin, cookie, {
-        action: 'generate',
+        action: 'start',
         request: { kind: 'image', prompt: 'x', model: 'agnes-image-2.5-flash', size: '1K', ratio: '1:1', references: [] },
       })
       assert.equal(notConfigured.code, 'agnes-studio/not-configured')

@@ -306,10 +306,39 @@ export interface Generation {
   readonly retryable?: boolean
   /** Upstream task id for video generations, useful when reporting a bug. */
   readonly upstreamId?: string
+  /**
+   * The exact request that produced this record.
+   *
+   * Kept so "retry" can resend what THIS card asked for. The `params` field is
+   * a flattened summary for display and loses the reference URLs, so rebuilding
+   * a request from it would silently drop an image reference or a keyframe.
+   * Absent on records written before this field existed.
+   */
+  readonly request?: GenerationRequest
 }
 
 /** Where the API key came from, so the dashboard can explain configuration. */
 export type KeySource = 'credential' | 'environment' | 'none'
+
+/**
+ * One generation currently running on the Host.
+ *
+ * The Host owns this, not the panel. A generation outlives the HTTP request that
+ * started it (and the React tree that asked for it), so "is something running?"
+ * cannot be panel state: leaving the studio and coming back used to lose it
+ * entirely, showing an idle form while a video was still rendering.
+ */
+export interface RunningJob {
+  /** The generation id this job will settle into. */
+  readonly id: string
+  readonly kind: MediaKind
+  readonly prompt: string
+  readonly model: string
+  /** When the Host started the job. */
+  readonly startedAt: string
+  /** The record this job replaces on settle, when it is a retry. */
+  readonly retryOf?: string
+}
 
 /** Host capabilities and configuration state the dashboard shows. */
 export interface StudioState {
@@ -325,6 +354,8 @@ export interface StudioState {
   readonly upstreamModelsError?: string
   /** Stored generations, newest first. */
   readonly generations: readonly Generation[]
+  /** Generations in flight right now, oldest first. */
+  readonly running: readonly RunningJob[]
 }
 
 /** The Host RPC endpoint name shared by both halves. */
@@ -373,8 +404,23 @@ export function mediaIdFrom(url: string): string | undefined {
 
 /** Every request the dashboard can send to the Host. */
 export type StudioRequest =
-  | { readonly action: 'state' }
-  | { readonly action: 'generate'; readonly request: GenerationRequest }
+  | { readonly action: 'state'; readonly probeModels?: boolean }
+  | {
+      /**
+       * Start a generation in the BACKGROUND and answer immediately.
+       *
+       * The panel never awaits a generation: a video render takes minutes and the
+       * user is expected to look elsewhere. The outcome is read back through
+       * `state`, which is also what makes a job survive the panel unmounting.
+       */
+      readonly action: 'start'
+      readonly request: GenerationRequest
+      /** Id of the failed record being retried, when this starts a retry. */
+      readonly retryOf?: string
+    }
+  | { readonly action: 'retry'; readonly id: string }
+  | { readonly action: 'cancel'; readonly id: string }
+  | { readonly action: 'optimize'; readonly prompt: string; readonly kind: MediaKind }
   | { readonly action: 'delete'; readonly id: string }
   | { readonly action: 'clear' }
 
@@ -383,4 +429,6 @@ export interface StudioResult {
   readonly state: StudioState
   /** The generation just produced, when the request created one. */
   readonly created?: Generation
+  /** The rewritten prompt, when the request was a prompt optimization. */
+  readonly prompt?: string
 }

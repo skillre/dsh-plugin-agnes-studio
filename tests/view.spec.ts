@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { StudioPage, SidebarGlyph } from '../src/client/view.js'
 import { dictFor, NAMESPACE, zh } from '../src/client/text.js'
 import type { ClientApi } from '../src/client/api.js'
-import type { Generation, StudioState } from '../src/types.js'
+import type { Generation, MediaKind, StudioState } from '../src/types.js'
 
 /** Every render starts from an empty document so queries cannot match a previous panel. */
 afterEach(() => {
@@ -29,43 +29,57 @@ function translate(key: string, params?: Record<string, string | number>): strin
 }
 
 /** A fake API that records calls and answers with a fixed state. */
-function fakeApi(state: Partial<StudioState> = {}): { api: ClientApi; generated: unknown[] } {
+function fakeApi(state: Partial<StudioState> = {}): {
+  api: ClientApi
+  generated: unknown[]
+  retried: string[]
+  optimized: { prompt: string; kind: MediaKind }[]
+} {
   const full: StudioState = {
     configured: true,
     keySource: 'credential',
     baseUrl: 'https://apihub.agnes-ai.com/v1',
     upstreamModels: ['agnes-image-2.5-flash'],
     generations: [],
+    running: [],
     ...state,
   }
   const generated: unknown[] = []
+  /** The record id each retry targeted. */
+  const retried: string[] = []
+  const optimized: { prompt: string; kind: MediaKind }[] = []
   const api: ClientApi = {
     state: async () => full,
-    generate: async (request) => {
+    // The Host answers a start by registering a job; the panel then polls.
+    start: async (request, retryOf) => {
       generated.push(request)
-      const created: Generation = {
-        id: 'generated',
-        kind: request.kind,
-        status: 'succeeded',
-        model: request.model,
-        prompt: request.prompt,
-        params: {},
-        createdAt: new Date().toISOString(),
-        asset: { src: '/api/agnes-studio/media/generated', mediaType: 'image/png', bytes: 10 },
+      if (retryOf !== undefined) retried.push(retryOf)
+      return {
+        ...full,
+        running: [
+          { id: retryOf ?? 'generated', kind: request.kind, prompt: request.prompt, model: request.model, startedAt: new Date().toISOString(), ...(retryOf === undefined ? {} : { retryOf }) },
+        ],
       }
-
-      const next: StudioState = { ...full, generations: [created] }
-      return { state: next, created }
+    },
+    retry: async (id) => {
+      retried.push(id)
+      const target = full.generations.find((generation) => generation.id === id)
+      return { ...full, running: [{ id, kind: target?.kind ?? 'image', prompt: target?.prompt ?? '', model: target?.model ?? '', startedAt: new Date().toISOString(), retryOf: id }] }
+    },
+    cancel: async () => ({ ...full, running: [] }),
+    optimize: async (prompt, kind) => {
+      optimized.push({ prompt, kind })
+      return `${prompt} —— 具体、高清、自然光线`
     },
     remove: async () => full,
     clear: async () => full,
   }
-  return { api, generated }
+  return { api, generated, retried, optimized }
 }
 
 /** Render the panel with a fake API. */
 function renderPanel(state: Partial<StudioState> = {}) {
-  const { api, generated } = fakeApi(state)
+  const { api, generated, retried, optimized } = fakeApi(state)
   const view = render(
     createElement(StudioPage, {
       api,
@@ -73,7 +87,7 @@ function renderPanel(state: Partial<StudioState> = {}) {
       t: translate,
     }),
   )
-  return { ...view, api, generated }
+  return { ...view, api, generated, retried, optimized }
 }
 
 describe('sidebar glyph', () => {
@@ -155,6 +169,44 @@ describe('studio panel', () => {
 
     renderPanel({ generations: [{ ...base, id: 'f2', retryable: true }] })
     expect(await screen.findAllByRole('button', { name: translate('gallery.retry') })).not.toHaveLength(0)
+  })
+
+  it('retries the record the click belongs to, by id', async () => {
+    // Retry is a Host operation keyed by the record id: the panel must not resend a
+    // shared "last submitted" request, and it must not depend on anything only this
+    // component instance remembers. That is exactly why retry did nothing after the
+    // user left the studio and came back — the remembered request was gone.
+    const failedA: Generation = {
+      id: 'aaaa1111-1111-4111-8111-111111111111',
+      kind: 'image',
+      status: 'failed',
+      model: 'agnes-image-2.1-flash',
+      prompt: 'a blue square',
+      params: {},
+      createdAt: '2026-11-11T00:00:00.000Z',
+      errorCode: 'upstream-failed',
+      error: '上游 502',
+      retryable: true,
+      request: { kind: 'image', prompt: 'a blue square', model: 'agnes-image-2.1-flash', size: '1K', ratio: '1:1', references: [] },
+    }
+    const failedB: Generation = {
+      ...failedA,
+      id: 'bbbb2222-2222-4222-8222-222222222222',
+      prompt: 'a green circle',
+      request: { kind: 'image', prompt: 'a green circle', model: 'agnes-image-2.1-flash', size: '2K', ratio: '4:3', references: [] },
+    }
+    const { retried } = renderPanel({ generations: [failedA, failedB] })
+    const retryButtons = await screen.findAllByRole('button', { name: translate('gallery.retry') })
+    expect(retryButtons).toHaveLength(2)
+
+    // The gallery lists newest first, so the second card is failedB.
+    fireEvent.click(retryButtons[1] as HTMLElement)
+    await waitFor(() => {
+      expect(retried).toHaveLength(1)
+    })
+    expect(retried[0]).toBe(failedB.id)
+    // A retry puts a placeholder in the grid, so the click has visible feedback.
+    await waitFor(() => expect(document.querySelector('.agnes__card--pending')).not.toBeNull())
   })
 
   it('switches to the video form and narrows the resolution list with the model', async () => {
@@ -239,34 +291,59 @@ describe('studio panel', () => {
     expect(imageTab?.getAttribute('aria-selected')).toBe('true')
   })
 
-  it('shows a skeleton card while a request is in flight', async () => {
-    // A slow video used to show one line of text above the gallery, which reads
-    // as "nothing happened". The grid now reserves the slot the result fills.
-    let release: (() => void) | undefined
-    const { api } = fakeApi()
-    const slow: ClientApi = {
-      ...api,
-      generate: async (request) => {
-        await new Promise<void>((resolve) => {
-          release = resolve
-        })
-        return { state: { ...(await api.state()), generations: [] }, created: {} as Generation }
-      },
-    }
+  it('shows a skeleton card for a running job reported by the Host', async () => {
+    // A running job is Host state, not panel state: the panel renders the slot the
+    // result will fill from `state.running`, which is why it is still there after
+    // the user leaves the studio and comes back.
+    const { api } = fakeApi({
+      running: [{ id: 'job-1', kind: 'video', prompt: 'a slow one', model: 'agnes-video-2.5', startedAt: new Date().toISOString() }],
+    })
     render(
       createElement(StudioPage, {
-        api: slow,
+        api,
         locale: { getSnapshot: () => ({ active: 'zh', locales: [], revision: 0 }), subscribe: () => () => undefined, register: () => () => undefined, bind: () => translate },
         t: translate,
       }),
     )
-    fireEvent.change(await screen.findByLabelText(translate('form.prompt')), { target: { value: 'a slow one' } })
-    fireEvent.click(screen.getByRole('button', { name: translate('form.submitImage') }))
     await waitFor(() => expect(document.querySelector('.agnes__card--pending')).not.toBeNull())
     // The submit is disabled while it runs, so a double click cannot double the cost.
     expect((screen.getByRole('button', { name: translate('form.submitImage') }) as HTMLButtonElement).disabled).toBe(true)
-    release?.()
-    await waitFor(() => expect(document.querySelector('.agnes__card--pending')).toBeNull())
+    // The job cannot be stopped from anywhere else, so the panel offers it.
+    expect(screen.getAllByRole('button', { name: translate('action.cancelJob') }).length).toBeGreaterThan(0)
+  })
+
+  it('keeps polling while the Host reports a running job, then stops', async () => {
+    // Coming back to the studio must show progress, which only works if the panel
+    // asks the Host. This asserts the poll actually happens and then ceases.
+    let polls = 0
+    const running = [{ id: 'job-1', kind: 'image' as const, prompt: 'slow', model: 'm', startedAt: new Date().toISOString() }]
+    const api: ClientApi = {
+      ...fakeApi().api,
+      state: async () => {
+        polls += 1
+        // The second poll reports the job finished.
+        return {
+          configured: true,
+          keySource: 'credential',
+          baseUrl: '',
+          upstreamModels: [],
+          generations: [],
+          running: polls >= 2 ? [] : running,
+        }
+      },
+    }
+    render(
+      createElement(StudioPage, {
+        api,
+        locale: { getSnapshot: () => ({ active: 'zh', locales: [], revision: 0 }), subscribe: () => () => undefined, register: () => () => undefined, bind: () => translate },
+        t: translate,
+      }),
+    )
+    await waitFor(() => expect(polls).toBeGreaterThanOrEqual(2), { timeout: 6000 })
+    // Once the job settled the interval must stop, or an idle panel would poll forever.
+    const settledAt = polls
+    await new Promise((resolve) => setTimeout(resolve, 2200))
+    expect(polls).toBe(settledAt)
   })
 })
 

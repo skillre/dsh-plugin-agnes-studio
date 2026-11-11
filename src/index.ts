@@ -136,6 +136,11 @@ export function apply(ctx: Context, rawConfig: Partial<StudioConfig> = {}): void
   ctx.effect(() => connection.fetch.register(createExecuteRoute(runtime)), 'skillre-agnes-studio client route')
   ctx.effect(() => connection.fetch.register(createMediaRoute(runtime)), 'skillre-agnes-studio media route')
 
+  // Background jobs belong to this Fiber: stopping or updating the plugin row
+  // must abort them instead of leaving detached fetches running against a
+  // registry nothing can reach any more.
+  ctx.effect(() => () => runtime.dispose(), 'skillre-agnes-studio background jobs')
+
   if (config.enableTools) {
     registerAgentTools(ctx, runtime, () => service<Attachments>(ctx, 'attachments'))
   }

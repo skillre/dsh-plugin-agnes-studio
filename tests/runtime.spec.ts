@@ -10,9 +10,10 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { openStore, isStoreId, newGenerationId } from '../src/store.js'
 import { createRuntime, defaultRequest } from '../src/runtime.js'
+import { StudioError } from '../src/errors.js'
 import type { AgnesClient, ClientDeps } from '../src/agnes.js'
 import { createExecuteRoute, createMediaRoute, parseRange, EXECUTE_PATH } from '../src/transport.js'
 import { MEDIA_PATH, mediaIdFrom, mediaPathFor, type Generation, type GenerationRequest } from '../src/types.js'
@@ -50,6 +51,7 @@ function fakeClient(overrides: Partial<AgnesClient> = {}): AgnesClient {
     generateImage: async () => ({ bytes: PNG, mediaType: 'image/png' }),
     generateVideo: async () => ({ bytes: new Uint8Array([0, 0, 0, 0]), mediaType: 'video/mp4', upstreamId: 'video_1' }),
     listModels: async () => ({ models: ['agnes-image-2.5-flash'] }),
+    optimizePrompt: async () => 'optimized prompt',
     ...overrides,
   }
 }
@@ -218,6 +220,85 @@ describe('runtime', () => {
     expect(state.generations[0]?.retryable).toBe(true)
   })
 
+  it('replaces the failed record on retry instead of appending a new one', async () => {
+    // The reported bug: retrying a queue-full video five times left five
+    // identical failure rows in the gallery, because every attempt minted a new
+    // id. A retry names the record it replaces, so the count must stay at one.
+    let attempts = 0
+    const failing = fakeClient({
+      generateVideo: async () => {
+        attempts += 1
+        const { StudioError } = await import('../src/errors.js')
+        throw new StudioError('queue-full', `队列已满（第 ${String(attempts)} 次）`, {}, true)
+      },
+    })
+    const runtime = await runtimeWith(failing)
+    const request = defaultRequest('video', 'x')
+
+    await expect(runtime.generate(request)).rejects.toMatchObject({ code: 'queue-full' })
+    const first = (await runtime.state()).generations
+    expect(first).toHaveLength(1)
+    const originalId = first[0]?.id
+    const originalCreatedAt = first[0]?.createdAt
+    expect(originalId).toBeDefined()
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await expect(runtime.generate(request, { retryOf: originalId as string })).rejects.toMatchObject({ code: 'queue-full' })
+    }
+
+    const after = (await runtime.state()).generations
+    // Still exactly one row, still the same identity, and it carries the LATEST
+    // error rather than the first one.
+    expect(after).toHaveLength(1)
+    expect(after[0]?.id).toBe(originalId)
+    expect(after[0]?.createdAt).toBe(originalCreatedAt)
+    expect(after[0]?.error).toContain('第 5 次')
+  })
+
+  it('replaces the failed record with the success when a retry finally works', async () => {
+    // The other half of the same bug: a retry that SUCCEEDS must also update the
+    // row in place, otherwise the failure stays beside a duplicate success.
+    let attempts = 0
+    const flaky = fakeClient({
+      generateImage: async () => {
+        attempts += 1
+        if (attempts === 1) {
+          const { StudioError } = await import('../src/errors.js')
+          throw new StudioError('upstream-failed', '上游 502', {}, true)
+        }
+        return { bytes: PNG, mediaType: 'image/png' }
+      },
+    })
+    const runtime = await runtimeWith(flaky)
+    const request = defaultRequest('image', 'a red apple')
+
+    await expect(runtime.generate(request)).rejects.toMatchObject({ code: 'upstream-failed' })
+    const failedId = (await runtime.state()).generations[0]?.id
+    expect(failedId).toBeDefined()
+
+    const succeeded = await runtime.generate(request, { retryOf: failedId as string })
+    expect(succeeded.status).toBe('succeeded')
+    expect(succeeded.id).toBe(failedId)
+    const after = (await runtime.state()).generations
+    expect(after).toHaveLength(1)
+    expect(after[0]?.status).toBe('succeeded')
+    expect(after[0]?.error).toBeUndefined()
+  })
+
+  it('stores the exact request so a retry resends what that record asked for', async () => {
+    // Rebuilding a request from `params` would lose reference URLs (params is a
+    // flattened display summary), so the request itself is persisted.
+    const runtime = await runtimeWith(fakeClient())
+    const request = {
+      ...defaultRequest('image', 'a red apple'),
+      references: [{ url: 'https://example.test/ref.png', kind: 'image' as const }],
+    }
+    const stored = await runtime.generate(request)
+    expect(stored.request).toEqual(request)
+    const reread = (await runtime.state()).generations[0]
+    expect(reread?.request).toEqual(request)
+  })
+
   it('records a retryable failure without inventing a media asset', async () => {
     // A failed generation has no bytes. Writing an empty
     // `application/octet-stream` asset made the panel render a broken <video>.
@@ -229,6 +310,140 @@ describe('runtime', () => {
     expect(await store.readMedia(stored.id)).toBeUndefined()
     const files = await readdir(join(dataDir, 'media'))
     expect(files).toHaveLength(0)
+  })
+
+  it('refuses an unsupported parameter synchronously, before any job exists', async () => {
+    // `start` answers immediately and reports outcomes only through stored records,
+    // so a bad parameter validated inside the background task would surface as a
+    // failed CARD. It must be refused by the call itself, and leave no job behind.
+    const runtime = await runtimeWith(fakeClient())
+    const bad = { ...defaultRequest('image', 'x'), size: '8K' } as unknown as GenerationRequest
+    await expect(runtime.start(bad)).rejects.toMatchObject({ code: 'invalid-parameter' })
+    expect((await runtime.state()).running).toEqual([])
+    // Same for a model that belongs to the other capability.
+    const wrongModel = { ...defaultRequest('image', 'x'), model: 'agnes-video-2.5' } as GenerationRequest
+    await expect(runtime.start(wrongModel)).rejects.toMatchObject({ code: 'invalid-model' })
+    expect((await runtime.state()).running).toEqual([])
+  })
+
+  it('reports a running job in state, and clears it once it settles', async () => {
+    // The Host owns in-flight work, which is what lets the panel show a job that
+    // was started before it mounted. Without this, leaving the studio lost the
+    // only evidence a video was still rendering.
+    let release: (() => void) | undefined
+    const slow = fakeClient({
+      generateImage: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return { bytes: PNG, mediaType: 'image/png' }
+      },
+    })
+    const runtime = await runtimeWith(slow)
+    const job = await runtime.start(defaultRequest('image', 'a slow one'))
+    expect(job.kind).toBe('image')
+    expect(job.prompt).toBe('a slow one')
+
+    const during = await runtime.state()
+    expect(during.running).toHaveLength(1)
+    expect(during.running[0]?.id).toBe(job.id)
+    // A job in flight is not a stored record yet.
+    expect(during.generations).toEqual([])
+
+    release?.()
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).running).toEqual([])
+    })
+    const after = await runtime.state()
+    expect(after.generations).toHaveLength(1)
+    expect(after.generations[0]?.id).toBe(job.id)
+  })
+
+  it('keeps a background failure as a record the panel can see', async () => {
+    // A background job has no request to report on, so a failure that vanished
+    // would be invisible: the user would come back to an idle panel and no record.
+    const failing = fakeClient({
+      generateImage: async () => {
+        const { StudioError } = await import('../src/errors.js')
+        throw new StudioError('invalid-parameter', 'bad size')
+      },
+    })
+    const runtime = await runtimeWith(failing)
+    await runtime.start(defaultRequest('image', 'x'))
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).generations).toHaveLength(1)
+    })
+    const state = await runtime.state()
+    expect(state.generations[0]?.status).toBe('failed')
+    expect(state.generations[0]?.errorCode).toBe('invalid-parameter')
+    // The job is settled, so nothing is running any more.
+    expect(state.running).toEqual([])
+  })
+
+  it('cancels a running job and leaves no record behind', async () => {
+    // A background job the user cannot stop would hold the form disabled until the
+    // 15-minute video timeout, with nothing on screen to act on.
+    const hang = fakeClient({
+      generateImage: async (_request, options) => {
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            reject(new StudioError('cancelled', '请求已取消。'))
+          })
+        })
+        return { bytes: PNG, mediaType: 'image/png' }
+      },
+    })
+    const runtime = await runtimeWith(hang)
+    const job = await runtime.start(defaultRequest('image', 'x'))
+    expect(runtime.cancel(job.id)).toBe(true)
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).running).toEqual([])
+    })
+    expect((await runtime.state()).generations).toEqual([])
+    // Cancelling an id that is not running is a no-op, not a crash.
+    expect(runtime.cancel(job.id)).toBe(false)
+  })
+
+  it('dies with the plugin: dispose aborts every running job', async () => {
+    let aborted = false
+    const hang = fakeClient({
+      generateImage: async (_request, options) => {
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            aborted = true
+            reject(new Error('aborted'))
+          })
+        })
+        return { bytes: PNG, mediaType: 'image/png' }
+      },
+    })
+    const runtime = await runtimeWith(hang)
+    await runtime.start(defaultRequest('image', 'x'))
+    runtime.dispose()
+    await vi.waitFor(() => {
+      expect(aborted).toBe(true)
+    })
+    expect((await runtime.state()).running).toEqual([])
+  })
+
+  it('optimizes a prompt with the text model', async () => {
+    const seen: { prompt: string; kind: string }[] = []
+    const runtime = await runtimeWith(
+      fakeClient({
+        optimizePrompt: async (request) => {
+          seen.push({ prompt: request.prompt, kind: request.kind })
+          return '一只橘猫，午后窗边，柔和侧光，浅景深'
+        },
+      }),
+    )
+    expect(await runtime.optimize({ prompt: '  一只猫  ', kind: 'image' })).toContain('橘猫')
+    // The draft is trimmed before it reaches the model.
+    expect(seen[0]).toEqual({ prompt: '一只猫', kind: 'image' })
+  })
+
+  it('refuses to optimize an empty prompt without calling upstream', async () => {
+    const runtime = await runtimeWith(fakeClient())
+    await expect(runtime.optimize({ prompt: '   ', kind: 'image' })).rejects.toMatchObject({ code: 'bad-request' })
   })
 
   it('does not store a transient non-retryable failure as history', async () => {
@@ -303,7 +518,7 @@ describe('routes', () => {
 
   it('reports a StudioError with its own code, never an internal fault', async () => {
     const runtime = await runtimeWith(fakeClient(), { key: '' })
-    const { body } = await rpc(runtime, { action: 'generate', request: defaultRequest('image', 'x') })
+    const { body } = await rpc(runtime, { action: 'start', request: defaultRequest('image', 'x') })
     const parsed = body as { result: { ok: boolean; error: { code: string } } }
     expect(parsed.result.ok).toBe(false)
     expect(parsed.result.error.code).toBe('agnes-studio/not-configured')

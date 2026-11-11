@@ -110,6 +110,15 @@ export const zh: Record<string, string> = {
   'error.unknown': '出错了',
 
   'action.dismiss': '知道了',
+  'action.cancelJob': '取消',
+  'form.optimize': '优化提示词',
+  'form.optimizing': '优化中…',
+  'form.optimized': '已按 Agnes 建议改写',
+  'form.optimizeUndo': '撤销',
+  'form.optimizeHint': '让 Agnes 把这段提示词写得更具体，然后你可以继续改。',
+  'hint.background': '任务在后台运行，可以离开这里，回来仍能看到进度。',
+  'hint.retrying': '正在重试，完成后会更新这条记录。',
+  'error.optimizeFailed': '优化提示词失败，原提示词没有改动。',
 
   'hint.dimensions': '输出 {width}×{height}',
   'hint.imageFast': '图片是同步任务：通常 10–60 秒出结果。',
@@ -213,6 +222,15 @@ export const en: Record<string, string> = {
   'error.unknown': 'Something went wrong',
 
   'action.dismiss': 'Dismiss',
+  'action.cancelJob': 'Cancel',
+  'form.optimize': 'Improve prompt',
+  'form.optimizing': 'Improving…',
+  'form.optimized': 'Rewritten by Agnes',
+  'form.optimizeUndo': 'Undo',
+  'form.optimizeHint': 'Ask Agnes to make this prompt more specific; you can keep editing after.',
+  'hint.background': 'Running in the background — leave this panel and come back to see progress.',
+  'hint.retrying': 'Retrying; this record updates when it finishes.',
+  'error.optimizeFailed': 'Could not improve the prompt. Your original text was left unchanged.',
 
   'hint.dimensions': 'Output {width}×{height}',
   'hint.imageFast': 'Images are synchronous — usually 10–60 seconds.',

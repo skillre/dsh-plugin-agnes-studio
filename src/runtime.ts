@@ -7,21 +7,26 @@
  * makes the panel a view of the plugin's real work instead of a parallel
  * implementation.
  *
- * Only settled generations are persisted: the in-flight state lives in the
- * dashboard's own memory, so a crash never leaves a `running` record that can
- * never finish. A retryable failure (queue full, timeout) IS recorded so the
- * panel can offer an unchanged retry; a plain validation refusal is not, because
- * the user already sees it in the error line.
+ * The Host also owns the IN-FLIGHT state, not the panel. A generation runs in
+ * this registry, detached from the HTTP request that started it, so switching
+ * away from the studio, closing the tab, or a slow video render cannot lose it:
+ * the job keeps running and `state()` reports it until it settles into a stored
+ * record. Only settled generations are persisted — a crash never leaves a
+ * `running` record that could never finish, it just loses an in-memory job.
+ * A retryable failure (queue full, timeout) IS recorded so the panel can offer
+ * an unchanged retry; a plain validation refusal is not, because the user
+ * already sees it in the error line.
  */
 
 import { asStudioError, notConfigured, StudioError } from './errors.js'
-import { createClient, type AgnesClient, type ClientDeps } from './agnes.js'
+import { createClient, validateRequest, type AgnesClient, type ClientDeps } from './agnes.js'
 import { newGenerationId, type StudioStore } from './store.js'
 import {
   defaultModelFor,
   type Generation,
   type GenerationRequest,
   type MediaKind,
+  type RunningJob,
   type StudioState,
   type KeySource,
 } from './types.js'
@@ -49,10 +54,22 @@ export interface RuntimeDeps {
 
 /** The runtime surface the route and the tools share. */
 export interface StudioRuntime {
-  /** Current state for the dashboard. */
+  /** Current state for the dashboard, including every in-flight job. */
   state(options?: { probeModels?: boolean; signal?: AbortSignal }): Promise<StudioState>
-  /** Run one generation and store the artifact. */
-  generate(request: GenerationRequest, options?: { signal?: AbortSignal }): Promise<Generation>
+  /** Run one generation to completion and store the artifact (tools await this). */
+  generate(request: GenerationRequest, options?: GenerateOptions): Promise<Generation>
+  /**
+   * Start a generation in the background and return its job immediately.
+   *
+   * This is what the panel uses: the job belongs to the Host, so it survives the
+   * panel unmounting. Its outcome lands in the store and is reported through
+   * `state()`, never through this call's return value.
+   */
+  start(request: GenerationRequest, options?: GenerateOptions): Promise<RunningJob>
+  /** Cancel one running job; returns whether it was running. */
+  cancel(id: string): boolean
+  /** Optimize a prompt with the text model; returns the rewritten prompt. */
+  optimize(request: OptimizeRequest, options?: { signal?: AbortSignal }): Promise<string>
   /** Remove one generation. */
   remove(id: string): Promise<boolean>
   /** Remove every generation. */
@@ -63,6 +80,30 @@ export interface StudioRuntime {
   mediaPath(id: string): Promise<string | undefined>
   /** Whether a key is currently resolvable. */
   isConfigured(): Promise<boolean>
+  /** Abort every running job; called from the plugin Fiber's teardown. */
+  dispose(): void
+}
+
+/** One prompt-optimization request. */
+export interface OptimizeRequest {
+  readonly prompt: string
+  readonly kind: MediaKind
+}
+
+/** One generate call's options. */
+export interface GenerateOptions {
+  readonly signal?: AbortSignal
+  /**
+   * Id of the failed record this attempt retries, if any.
+   *
+   * When present the settled outcome REPLACES that record instead of adding a
+   * new one. Retrying an identical request used to append a fresh row every
+   * time, so a queue-full condition the user retried five times left five
+   * identical failures in the gallery and the history cap churned through them.
+   * The store keys records by id and `append` already replaces by id, so
+   * reusing the id is the whole mechanism.
+   */
+  readonly retryOf?: string
 }
 
 /** Normalize the parameters actually sent, for the record's detail view. */
@@ -99,6 +140,15 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
   })
 
+  /**
+   * The in-flight registry.
+   *
+   * Keyed by the generation id the job will settle into, so a retry of an
+   * existing record occupies that record's slot and the panel can render one
+   * placeholder per id without de-duplicating.
+   */
+  const jobs = new Map<string, { job: RunningJob; controller: AbortController }>()
+
   /** Build the state document the dashboard renders. */
   const buildState = async (generations: readonly Generation[], extra: Partial<StudioState> = {}): Promise<StudioState> => {
     let configured = false
@@ -116,8 +166,147 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
       baseUrl: deps.baseUrl,
       upstreamModels: [],
       generations,
+      running: [...jobs.values()].map((entry) => entry.job),
       ...extra,
     }
+  }
+
+  /** Register a running job and return its abort controller. */
+  const registerJob = (job: RunningJob, external?: AbortSignal): AbortController => {
+    const controller = new AbortController()
+    // The job's own controller is what the panel's cancel button aborts; the
+    // caller's signal (a tool execution) can also end it. Neither is the HTTP
+    // request's signal, which would tie the work to the panel being open.
+    const onExternalAbort = (): void => controller.abort(external?.reason)
+    if (external !== undefined) {
+      if (external.aborted) controller.abort(external.reason)
+      else external.addEventListener('abort', onExternalAbort, { once: true })
+    }
+    jobs.set(job.id, { job, controller })
+    return controller
+  }
+
+  /** Drop a settled job from the registry. */
+  const unregisterJob = (id: string): void => {
+    jobs.delete(id)
+  }
+
+  /**
+   * Resolve everything a generation needs before any network call, and register
+   * the job.
+   *
+   * Split out so both entry points share one preflight: a missing key must fail
+   * BEFORE a job is registered (otherwise the panel would poll a placeholder that
+   * never settles), and a retry must recover the original `createdAt` so the row
+   * keeps its identity.
+   */
+  const begin = async (
+    request: GenerationRequest,
+    options: GenerateOptions,
+  ): Promise<{ job: RunningJob; controller: AbortController; id: string; createdAt: string; attemptStartedAt: number }> => {
+    const key = await deps.resolveKey().catch(() => {
+      throw notConfigured()
+    })
+    if (key.key === '') throw notConfigured()
+
+    // Validate SYNCHRONOUSLY, before a job exists. A background job's outcome
+    // reaches the panel only through a stored record, so an unsupported size or a
+    // video model named for an image would come back as a failed CARD instead of
+    // the immediate refusal the caller can act on. The key check runs first so an
+    // unconfigured profile still reports "no key" rather than a parameter detail.
+    validateRequest(request)
+
+    const id = options.retryOf ?? newGenerationId()
+    const createdAt =
+      options.retryOf === undefined
+        ? now().toISOString()
+        : ((await deps.store.list()).find((entry) => entry.id === options.retryOf)?.createdAt ?? now().toISOString())
+
+    const job: RunningJob = {
+      id,
+      kind: request.kind,
+      prompt: request.prompt,
+      model: request.model,
+      startedAt: now().toISOString(),
+      ...(options.retryOf === undefined ? {} : { retryOf: options.retryOf }),
+    }
+    const controller = registerJob(job, options.signal)
+    // `createdAt` is the record's identity (a retry keeps the original); the
+    // attempt start is separate so `durationMs` measures THIS try, not the whole
+    // history of a record the user has retried several times.
+    return { job, controller, id, createdAt, attemptStartedAt: Date.now() }
+  }
+
+  /** Run one generation to a settled record and store it. */
+  const runGeneration = async (
+    request: GenerationRequest,
+    id: string,
+    createdAt: string,
+    attemptStartedAt: number,
+    controller: AbortController,
+    /**
+     * Keep a non-retryable failure in the history.
+     *
+     * True for a background job (its record is the only report the user gets) and
+     * for a retry (it replaces a row the user can already see, so that row must
+     * not keep describing an older attempt). False for a tool call, which throws
+     * to its caller and would otherwise sprinkle validation noise into the gallery.
+     */
+    keepAnyFailure: boolean,
+  ): Promise<Generation> => {
+    const started = attemptStartedAt
+    const base = {
+      id,
+      kind: request.kind,
+      model: request.model,
+      prompt: request.prompt,
+      params: paramsOf(request),
+      createdAt,
+      // Stored verbatim so a later retry resends exactly what this record asked
+      // for: `params` is a flattened display summary and loses reference URLs.
+      request,
+    }
+    let outcome: { bytes: Uint8Array; mediaType: string; upstreamId?: string }
+    try {
+      outcome =
+        request.kind === 'image'
+          ? await client.generateImage(request, { signal: controller.signal })
+          : await client.generateVideo(request, { signal: controller.signal })
+    } catch (error) {
+      const failure = asStudioError(error)
+      const settledAt = now()
+      const failed: Generation = {
+        ...base,
+        status: 'failed',
+        finishedAt: settledAt.toISOString(),
+        durationMs: settledAt.getTime() - started,
+        errorCode: failure.code,
+        error: failure.message,
+        ...(failure.retryable ? { retryable: true } : {}),
+      }
+      // A BACKGROUND failure must always become a record: the panel has no
+      // request left to report it on, so a record is its only way to learn the
+      // job ended badly. The TOOL path throws to the caller instead, so a plain
+      // validation refusal there stays out of the history rather than becoming
+      // gallery noise — as does a retry, which replaces a row the user can
+      // already see and therefore may never silently disappear.
+      // A cancellation the user asked for is not a failure to remember: leaving a
+      // red "已取消" card behind would be noise the user caused on purpose.
+      if (failure.code !== 'cancelled' && (keepAnyFailure || failure.retryable === true || failure.code === 'timeout')) {
+        await deps.store.append(failed, new Uint8Array(0), 'application/octet-stream').catch(() => undefined)
+        throw new StudioError(failure.code, failure.message, { ...failure.details, recordId: id }, failure.retryable)
+      }
+      throw failure
+    }
+    const settledAt = now()
+    const record: Generation = {
+      ...base,
+      status: 'succeeded',
+      finishedAt: settledAt.toISOString(),
+      durationMs: settledAt.getTime() - started,
+      ...(outcome.upstreamId === undefined ? {} : { upstreamId: outcome.upstreamId }),
+    }
+    return deps.store.append(record, outcome.bytes, outcome.mediaType)
   }
 
   return {
@@ -136,61 +325,57 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     },
 
     async generate(request, options = {}) {
-      const started = now()
-      const id = newGenerationId()
-      const kind: MediaKind = request.kind
-      // Fail before touching the network when no key is configured.
+      // The tool path: register the job so the panel shows it, then await the
+      // outcome and let the throw reach the caller.
+      const { id, createdAt, attemptStartedAt, controller } = await begin(request, options)
+      try {
+        // A tool call reports through its throw; only a retry replaces an
+        // existing row and so must persist whatever the new outcome is.
+        return await runGeneration(request, id, createdAt, attemptStartedAt, controller, options.retryOf !== undefined)
+      } finally {
+        unregisterJob(id)
+      }
+    },
+
+    /**
+     * Start a generation and return immediately.
+     *
+     * The work is deliberately NOT tied to the caller: a video render outliving
+     * the panel (or the browser tab) is the normal case, not an error. The
+     * outcome reaches the user through `state()` — a stored record or a stored
+     * failure — which is what makes leaving the studio and coming back safe.
+     */
+    async start(request, options = {}) {
+      const { job, id, createdAt, attemptStartedAt, controller } = await begin(request, options)
+      // A background job's record IS its report, so every failure is kept.
+      void runGeneration(request, id, createdAt, attemptStartedAt, controller, true)
+        .catch(() => undefined)
+        .finally(() => unregisterJob(id))
+      return job
+    },
+
+    cancel(id) {
+      const entry = jobs.get(id)
+      if (entry === undefined) return false
+      entry.controller.abort()
+      return true
+    },
+
+    async optimize(request, options = {}) {
       const key = await deps.resolveKey().catch(() => {
         throw notConfigured()
       })
       if (key.key === '') throw notConfigured()
+      const prompt = request.prompt.trim()
+      if (prompt === '') throw new StudioError('bad-request', '请先写一个提示词，再让 Agnes 帮你优化。')
+      return client.optimizePrompt({ prompt, kind: request.kind }, { signal: options.signal })
+    },
 
-      // The record's identity and request facts, before the status is known.
-      const base = {
-        id,
-        kind,
-        model: request.model,
-        prompt: request.prompt,
-        params: paramsOf(request),
-        createdAt: started.toISOString(),
-      }
-      // Nothing is persisted while the request runs: the dashboard's own busy
-      // state is the in-flight indicator, so a crash cannot leave a record that
-      // never settles.
-      let outcome: { bytes: Uint8Array; mediaType: string; upstreamId?: string }
-      try {
-        outcome =
-          request.kind === 'image'
-            ? await client.generateImage(request, { signal: options.signal })
-            : await client.generateVideo(request, { signal: options.signal })
-      } catch (error) {
-        const failure = asStudioError(error)
-        const failed: Generation = {
-          ...base,
-          status: 'failed',
-          finishedAt: now().toISOString(),
-          durationMs: now().getTime() - started.getTime(),
-          errorCode: failure.code,
-          error: failure.message,
-          ...(failure.retryable ? { retryable: true } : {}),
-        }
-        // A failed attempt is kept only when it carries a retryable signal or an
-        // upstream id; otherwise it is transient noise the user already sees in
-        // the panel's own error line.
-        if (failed.retryable === true || failure.code === 'timeout') {
-          await deps.store.append(failed, new Uint8Array(0), 'application/octet-stream').catch(() => undefined)
-        }
-        throw failure
-      }
-      const finished = now()
-      const record: Generation = {
-        ...base,
-        status: 'succeeded',
-        finishedAt: finished.toISOString(),
-        durationMs: finished.getTime() - started.getTime(),
-        ...(outcome.upstreamId === undefined ? {} : { upstreamId: outcome.upstreamId }),
-      }
-      return deps.store.append(record, outcome.bytes, outcome.mediaType)
+    dispose() {
+      // Aborting every job on Fiber teardown is what keeps a plugin stop from
+      // leaving a detached fetch running against a dead registry.
+      for (const entry of jobs.values()) entry.controller.abort()
+      jobs.clear()
     },
 
     async remove(id) {

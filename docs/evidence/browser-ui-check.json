@@ -1,5 +1,5 @@
 {
-  "at": "2026-11-11T14:50:03.725Z",
+  "at": "2026-11-11T15:47:35.169Z",
   "dsh": "unknown",
   "checks": [
     "browser-app-boot",
@@ -8,7 +8,7 @@
     "browser-no-render-error",
     "browser-config-state: 未配置密钥 + notice",
     "browser-image-form-controls: seg 1K/2K/3K/4K, 8 ratio chips",
-    "browser-two-pane-layout: 372px + 521px side by side",
+    "browser-two-pane-layout: 372px + 728px side by side",
     "browser-video-form-controls: 720P,1080P,1K,2K",
     "browser-flash-narrows-sizes: 720P",
     "browser-submit-reachable: bottom 678 of 757",
@@ -29,6 +29,8 @@
     "browser-viewer-keyboard-zoom: 512px -> 640px at 125%",
     "browser-viewer-zoom-out-disabled: disabled",
     "browser-viewer-focus-returns",
+    "browser-prompt-optimizer: present, disabled without a key",
+    "browser-running-jobs-idle: no phantom in-flight UI",
     "display-detail-image: docs/DETAIL*.md + docs/preview*.svg present in the packed tarball",
     "browser-console-clean"
   ]

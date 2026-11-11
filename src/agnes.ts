@@ -31,6 +31,7 @@ import {
   type ImageRequest,
   type ImageRatio,
   type ImageSize,
+  type MediaKind,
   type MediaReference,
   type ModelSpec,
   type VideoMode,
@@ -64,6 +65,14 @@ export interface VideoOutcome {
   readonly upstreamId: string
 }
 
+/** One prompt-optimization request. */
+export interface OptimizePromptRequest {
+  /** The user's own prompt, already trimmed. */
+  readonly prompt: string
+  /** Which capability the prompt is for; image and video want different advice. */
+  readonly kind: MediaKind
+}
+
 /** Per-call options shared by both capabilities. */
 export interface CallOptions {
   readonly signal?: AbortSignal | undefined
@@ -75,6 +84,8 @@ export interface AgnesClient {
   generateVideo(request: VideoRequest, options?: CallOptions): Promise<VideoOutcome>
   /** Probe the upstream model catalog; never throws. */
   listModels(options?: CallOptions): Promise<{ models: readonly string[]; error?: string }>
+  /** Rewrite a prompt with the chat model; throws on an unusable answer. */
+  optimizePrompt(request: OptimizePromptRequest, options?: CallOptions): Promise<string>
 }
 
 /** Dependencies the client needs; all are plain values so tests stay offline. */
@@ -579,7 +590,72 @@ export function createClient(deps: ClientDeps): AgnesClient {
         return { models: [], error: failure?.message ?? '无法读取上游模型目录。' }
       }
     },
+
+    async optimizePrompt(request, options = {}) {
+      // The chat model is a different capability from the image/video models, but
+      // it is the same key and the same base URL, so it needs no extra config.
+      const body = buildOptimizeBody(request)
+      const { text } = await postJson('/chat/completions', body, OPTIMIZE_TIMEOUT_MS, options)
+      const prompt = parseOptimizeResponse(text)
+      if (prompt === '') throw new StudioError('upstream-failed', 'Agnes 没有返回可用的优化结果，请稍后重试。')
+      // The optimized prompt must still fit the prompt field it replaces.
+      return prompt.length > LIMITS.prompt ? prompt.slice(0, LIMITS.prompt) : prompt
+    },
   }
+}
+
+/** Model used for prompt rewriting; a text model, not an image one. */
+export const OPTIMIZE_MODEL = 'agnes-3.0-flash'
+
+/** How long a prompt rewrite may take. */
+const OPTIMIZE_TIMEOUT_MS = 60_000
+
+/**
+ * Build the chat-completions body for one prompt rewrite.
+ *
+ * The system instruction is deliberately narrow: it asks for a rewrite of the
+ * user's intent, never a new idea, and forbids the commentary the panel would
+ * otherwise paste into the prompt field. Image and video get different advice
+ * because the two models respond to different things — a video prompt needs
+ * motion and camera language, a still needs composition and light.
+ */
+export function buildOptimizeBody(request: OptimizePromptRequest): Record<string, unknown> {
+  const craft =
+    request.kind === 'video'
+      ? 'You rewrite prompts for a text-to-video model. Add concrete subject motion, camera movement (push in, pan, orbit), pacing and lighting. Keep it to one flowing paragraph.'
+      : 'You rewrite prompts for a text-to-image model. Add concrete subject detail, composition, lighting, lens/medium and style. Keep it to one flowing paragraph.'
+  return {
+    model: OPTIMIZE_MODEL,
+    messages: [
+      {
+        role: 'system',
+        content: `${craft} Rewrite the user's prompt in the SAME language they wrote it in. Preserve their subject and intent exactly; never invent a different scene. Return ONLY the rewritten prompt text: no quotes, no preface, no explanation.`,
+      },
+      { role: 'user', content: request.prompt },
+    ],
+    temperature: 0.7,
+    max_tokens: 600,
+  }
+}
+
+/** Pull the assistant text out of a chat-completions answer. */
+export function parseOptimizeResponse(text: string): string {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new StudioError('upstream-failed', 'Agnes 返回了无法解析的优化响应。')
+  }
+  const choices = (parsed as Record<string, unknown> | null)?.['choices']
+  if (!Array.isArray(choices) || choices.length === 0) {
+    throw new StudioError('upstream-failed', 'Agnes 的优化响应里没有结果。')
+  }
+  const message = (choices[0] as Record<string, unknown> | null)?.['message']
+  const content = (message as Record<string, unknown> | null)?.['content']
+  if (typeof content !== 'string') throw new StudioError('upstream-failed', 'Agnes 的优化响应里没有文本。')
+  // Trim the wrapping quotes a model sometimes adds, plus any leading label like
+  // "优化后的提示词：", which would otherwise end up inside the user's prompt.
+  return content.replace(/^\s*(?:优化后的?提示词|优化后|prompt)\s*[:：]\s*/i, '').replace(/^["'“”「」]\s*|\s*["'“”「」]$/g, '').trim()
 }
 
 /** The API root without the version suffix, for the non-`/v1` poll endpoint. */

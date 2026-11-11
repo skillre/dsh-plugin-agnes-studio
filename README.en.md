@@ -97,17 +97,41 @@ Deleting one record or clearing all in the panel removes both the index entry an
 See [UNINSTALL](UNINSTALL.md). Uninstalling does not delete `$DSH_HOME/agnes-studio`; remove it with
 the command above if you no longer want the files.
 
+## Background jobs and prompt optimization
+
+- **Work runs on the Host, not in the panel.** A generation answers as soon as the job is registered;
+  the task keeps running on the Host, so switching panels, navigating elsewhere, even reloading the
+  whole page does not interrupt it. Coming back, a running job is read from the Host's
+  `state.running` and shown again (progress bar and a cancel action); when it settles it becomes a
+  result card. Previously the in-flight marker lived in the React tree, so the work continued but
+  the panel showed nothing on return.
+- **Retry is a Host operation keyed by record id.** Clicking retry hands the record id to the Host,
+  which re-runs **that record's own stored request** — it does not depend on anything the panel
+  remembers, so retry keeps working after leaving, returning, or a full page reload (verified: a
+  reload followed by retry still starts a job). A retry updates the row in place instead of adding
+  one more failure per attempt.
+- **Prompt optimization.** The "Improve prompt" button in the prompt box calls Agnes' text model
+  (`agnes-3.0-flash`) to make the draft more specific, with different advice for stills (composition,
+  light, lens) and video (motion, camera movement, pacing), preserving your language and subject.
+  The rewrite is reversible with "Undo"; editing the text accepts it.
+- **Cancel.** A running job can be cancelled from the panel and leaves no failure record behind.
+
 ## Known limitations
 
 - Video is an **async** task: the Host polls upstream until it finishes. When the queue is full the
-  API answers HTTP 503 `video_queue_full`; the panel marks it retryable rather than reporting a
-  parameter error.
+  API answers HTTP 503 `video_queue_full`; the panel says in as many words that this is an upstream
+  concurrency limit rather than a problem with the request, and marks it retryable. Measured: this
+  state can persist for several minutes — it is upstream queueing, not a plugin fault.
 - References must be **publicly reachable** HTTPS URLs or `data:` URIs. localhost, private networks
   and plain HTTP are refused before the request is sent — upstream fetches the media itself, so such
   an address would only fail late.
+- When the account balance cannot cover a task, upstream returns 403 `insufficient_user_quota`; the
+  plugin reports it as an exhausted balance and says the key itself is valid, rather than blaming the
+  key. The paid `agnes-video-2.5` consumes quota; `agnes-video-2.5-flash` is free but shares a queue.
 - `agnes-video-2.5-flash` accepts no reference video and at most 5 reference images (`2.5` takes 8).
 - Generations are **local** and do not sync across machines; records past `historyLimit` are deleted.
 - The panel runs one task at a time, so a double submit cannot double the cost or deepen the queue.
+  The form stays disabled while a background job runs; cancel it from the panel to end it.
 - The image viewer zooms **inside the panel** and never opens the system image viewer or a new
   window: generated media is stored locally behind session authentication, so handing it to an
   external program would both answer 401 and bypass DSH's window policy.
@@ -120,14 +144,15 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 145 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 158 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering,
-  image-viewer interaction, and the SHIPPED client bundle (loaded and rendered through the real loader
-  envelope).
+  image-viewer interaction, the background-job lifecycle (state reporting a running job, a background
+  failure landing as a record, cancel leaving no record, dispose aborting every job, prompt
+  optimization), and the SHIPPED client bundle (loaded and rendered through the real loader envelope).
 - Packed tarball installed into a disposable isolated profile: `--dump-config` composition, bounded
   real startup, authenticated `/api` calls, a real image generation downloaded through the media
   route, records and files surviving a restart, and the file disappearing after deletion.
-- Real headless Chrome driving the DSH Web app — 29 checks: sidebar entry, panel render, the
+- Real headless Chrome driving the DSH Web app — 31 checks: sidebar entry, panel render, the
   two-pane layout (measured: both panes side by side, the composer not spanning the panel), the
   model-derived controls **and their shape** (four resolutions are a segmented control, eight ratios
   are chips), Flash narrowing the resolution list, the generate button reachable without scrolling,
@@ -135,8 +160,13 @@ the command above if you no longer want the files.
   results, both themes following the host (measured surface and text colours), and the image viewer
   (spans the viewport, zoom changes the measured layout, closes on Escape and on a backdrop click,
   does not close when the picture is clicked, steps through the gallery with the arrow keys and resets
-  the zoom per picture, and returns focus to the control that opened it). Evidence is in
-  `docs/evidence/`.
+  the zoom per picture, and returns focus to the control that opened it), the prompt optimizer being
+  in place, and no phantom in-flight UI while idle. Evidence is in `docs/evidence/`.
+- Real-key end-to-end runs (not in CI): submit an image, leave the panel, come back while it is still
+  rendering and see it running, then watch it settle into a result card; the same running job is still
+  shown as running after a **full page reload**, then settles into a result card; submit a video that
+  fails, reload the whole page, click retry on the failed record, and see a real job start with the
+  card count unchanged.
 
 ## Development
 

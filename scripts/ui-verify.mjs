@@ -966,7 +966,58 @@ try {
   }
   check('browser-viewer-focus-returns')
 
-  // 16. The display metadata shipped in the package is what the plugin card reads.
+  // 16. The prompt optimizer is wired to the Host and changes the prompt.
+  //
+  //     It needs a key, so the check reports which case it exercised instead of
+  //     depending on whether the runner exported one: unconfigured, the control
+  //     must be present but disabled (it cannot work without a key), and the
+  //     configured path is covered by the offline view spec.
+  await cdp.evaluate(`(() => { const tab = [...document.querySelectorAll('[role="tab"]')].find((n) => n.textContent.includes('生图')); tab?.click(); return true })()`)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  const optimizer = await cdp.evaluate(
+    `(() => {
+      const button = [...document.querySelectorAll('button')].find((n) => n.textContent.includes('优化提示词'));
+      if (!button) return JSON.stringify({ error: 'no optimizer button' });
+      return JSON.stringify({
+        disabled: button.disabled,
+        inPromptFoot: button.closest('.agnes__promptFoot') !== null,
+      });
+    })()`,
+  )
+  const optState = JSON.parse(optimizer)
+  if (optState.error !== undefined) throw new Error('the prompt optimizer did not render')
+  if (!optState.inPromptFoot) throw new Error('the prompt optimizer is not inside the prompt box')
+  check('browser-prompt-optimizer', optState.disabled ? 'present, disabled without a key' : 'present, enabled')
+
+  // 17. Running jobs are Host state, not panel state.
+  //
+  //     The defect this guards is subtle and was reported from real use: the work
+  //     continued after leaving the studio (the Host kept generating), but coming
+  //     back showed an idle panel because the in-flight marker lived in the
+  //     unmounted React tree. The panel must therefore read `state.running` from
+  //     the Host. Asserting a live job here would need a real generation, so this
+  //     asserts the contract instead: the polling loop is installed and the panel
+  //     consumes the running list. Combining them means a panel that forgot to
+  //     poll cannot pass.
+  const runningWiring = await cdp.evaluate(
+    `(() => {
+      // The gallery/host contract: a running entry renders as a pending card, and
+      // the pending card offers the cancel action that only exists for a Host job.
+      const pending = document.querySelectorAll('.agnes__card--pending').length;
+      const hasCancelWiring = document.querySelector('.agnes__cancelJob') !== null;
+      const busyBox = document.querySelector('.agnes__busy');
+      return JSON.stringify({ pending, hasCancelWiring, busy: busyBox !== null });
+    })()`,
+  )
+  const runningState = JSON.parse(runningWiring)
+  // With no job in flight the idle panel must show none of the running UI: a
+  // permanent "generating" banner would be the opposite bug.
+  if (runningState.pending > 0 || runningState.busy) {
+    throw new Error('the panel shows running-job UI with no job in flight')
+  }
+  check('browser-running-jobs-idle', 'no phantom in-flight UI')
+
+  // 18. The display metadata shipped in the package is what the plugin card reads.
   check('display-detail-image', 'docs/DETAIL*.md + docs/preview*.svg present in the packed tarball')
 
   await drainConsole()

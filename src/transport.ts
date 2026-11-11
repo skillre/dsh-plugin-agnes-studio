@@ -76,8 +76,11 @@ const videoRequestSchema = z
   .strict()
 
 const requestSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('state') }).strict(),
-  z.object({ action: z.literal('generate'), request: z.union([imageRequestSchema, videoRequestSchema]) }).strict(),
+  z.object({ action: z.literal('state'), probeModels: z.boolean().optional() }).strict(),
+  z.object({ action: z.literal('start'), request: z.union([imageRequestSchema, videoRequestSchema]), retryOf: z.string().min(1).max(128).optional() }).strict(),
+  z.object({ action: z.literal('retry'), id: z.string().min(1).max(128) }).strict(),
+  z.object({ action: z.literal('cancel'), id: z.string().min(1).max(128) }).strict(),
+  z.object({ action: z.literal('optimize'), prompt: z.string().min(1).max(4000), kind: z.enum(['image', 'video']) }).strict(),
   z.object({ action: z.literal('delete'), id: z.string().min(1).max(128) }).strict(),
   z.object({ action: z.literal('clear') }).strict(),
 ])
@@ -108,10 +111,34 @@ function correlation(body: unknown): string {
 async function dispatch(runtime: StudioRuntime, request: StudioRequest, signal: AbortSignal): Promise<StudioResult> {
   switch (request.action) {
     case 'state':
-      return { state: await runtime.state({ probeModels: true, signal }) }
-    case 'generate': {
-      const created = await runtime.generate(request.request, { signal })
-      return { state: await runtime.state(), created }
+      return { state: await runtime.state({ probeModels: request.probeModels === true, signal }) }
+    case 'start': {
+      // Deliberately does NOT pass `signal`: that is the HTTP request's signal, and
+      // tying the generation to it is exactly what made a job disappear when the
+      // panel unmounted. The job belongs to the plugin Fiber instead.
+      await runtime.start(request.request, request.retryOf === undefined ? {} : { retryOf: request.retryOf })
+      return { state: await runtime.state() }
+    }
+    case 'retry': {
+      // Rewriting the stored request from `params` would lose reference URLs, so
+      // the record's own `request` is replayed. A record written before that field
+      // existed cannot be retried faithfully; the error says so instead of
+      // silently sending a different request.
+      const record = (await runtime.state()).generations.find((entry) => entry.id === request.id)
+      if (record === undefined) throw new StudioError('bad-request', '这条记录已经不存在了，无法重试。')
+      if (record.request === undefined) {
+        throw new StudioError('bad-request', '这条记录来自更早的版本，没有保存原始请求参数，请重新填写后再生成。')
+      }
+      await runtime.start(record.request, { retryOf: record.id })
+      return { state: await runtime.state() }
+    }
+    case 'cancel': {
+      await runtime.cancel(request.id)
+      return { state: await runtime.state() }
+    }
+    case 'optimize': {
+      const prompt = await runtime.optimize({ prompt: request.prompt, kind: request.kind }, { signal })
+      return { state: await runtime.state(), prompt }
     }
     case 'delete': {
       await runtime.remove(request.id)

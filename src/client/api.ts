@@ -9,7 +9,7 @@
  */
 
 import type { ClientConnectionLike, RpcResult } from './contracts.js'
-import { ENDPOINT, type Generation, type GenerationRequest, type StudioResult, type StudioState } from '../types.js'
+import { ENDPOINT, type GenerationRequest, type MediaKind, type StudioResult, type StudioState } from '../types.js'
 
 /** Failure raised by the Host; `code` is stable enough to switch on. */
 export class ActionError extends Error {
@@ -30,10 +30,21 @@ export class ActionError extends Error {
 
 /** The one API face the view uses. */
 export interface ClientApi {
-  /** Read the full dashboard state (history plus configuration). */
-  state(signal?: AbortSignal): Promise<StudioState>
-  /** Run one generation; resolves with the new record and the refreshed state. */
-  generate(request: GenerationRequest, signal?: AbortSignal): Promise<{ state: StudioState; created: Generation }>
+  /**
+   * Read the full dashboard state (history, configuration and in-flight jobs).
+   *
+   * `probeModels` is opt-in because it costs an upstream request: the panel polls
+   * this while a job runs, and the model catalog does not change per poll.
+   */
+  state(options?: { signal?: AbortSignal; probeModels?: boolean }): Promise<StudioState>
+  /** Start a generation in the background; resolves with the refreshed state. */
+  start(request: GenerationRequest, retryOf?: string): Promise<StudioState>
+  /** Restart a stored failed record from ITS OWN stored request. */
+  retry(id: string): Promise<StudioState>
+  /** Cancel one running job. */
+  cancel(id: string): Promise<StudioState>
+  /** Rewrite a prompt with the text model. */
+  optimize(prompt: string, kind: MediaKind): Promise<string>
   /** Delete one generation. */
   remove(id: string, signal?: AbortSignal): Promise<StudioState>
   /** Delete every generation. */
@@ -58,6 +69,7 @@ function normalizeState(value: StudioState): StudioState {
     upstreamModels: Array.isArray(value?.upstreamModels) ? value.upstreamModels : [],
     ...(typeof value?.upstreamModelsError === 'string' ? { upstreamModelsError: value.upstreamModelsError } : {}),
     generations: Array.isArray(value?.generations) ? value.generations : [],
+    running: Array.isArray(value?.running) ? value.running : [],
   }
 }
 
@@ -68,14 +80,25 @@ export function createApi(connection: ClientConnectionLike, lifetime: AbortSigna
     return unwrap(await connection.rpc.call<StudioResult>('/api', ENDPOINT, payload, signalToUse))
   }
   return {
-    async state(signal) {
-      return normalizeState((await call({ action: 'state' }, signal)).state)
+    async state(options = {}) {
+      const payload = options.probeModels === true ? { action: 'state', probeModels: true } : { action: 'state' }
+      return normalizeState((await call(payload, options.signal)).state)
     },
-    async generate(request, signal) {
-      const result = await call({ action: 'generate', request }, signal)
-      const created = result.created
-      if (created === undefined) throw new ActionError('invalid-response', 'Host 没有返回生成结果。')
-      return { state: normalizeState(result.state), created }
+    async start(request, retryOf) {
+      return normalizeState(
+        (await call({ action: 'start', request, ...(retryOf === undefined ? {} : { retryOf }) })).state,
+      )
+    },
+    async retry(id) {
+      return normalizeState((await call({ action: 'retry', id })).state)
+    },
+    async cancel(id) {
+      return normalizeState((await call({ action: 'cancel', id })).state)
+    },
+    async optimize(prompt, kind) {
+      const result = await call({ action: 'optimize', prompt, kind })
+      if (typeof result.prompt !== 'string') throw new ActionError('invalid-response', 'Host 没有返回优化结果。')
+      return result.prompt
     },
     async remove(id, signal) {
       return normalizeState((await call({ action: 'delete', id }, signal)).state)

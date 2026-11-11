@@ -17,6 +17,7 @@ export type StudioErrorCode =
   | 'unauthorized'
   | 'rate-limited'
   | 'queue-full'
+  | 'quota-exceeded'
   | 'upstream-failed'
   | 'timeout'
   | 'download-failed'
@@ -57,6 +58,18 @@ export function notConfigured(): StudioError {
 export function fromUpstreamStatus(status: number, body: string): StudioError {
   const detail = extractDetail(body)
   const suffix = detail === '' ? '' : `：${detail}`
+  // Quota exhaustion is checked BEFORE the 401/403 branch: the video endpoint
+  // answers 403 `insufficient_user_quota` when the account balance cannot cover
+  // the task, and reporting that as "your API key is invalid" sends the user to
+  // re-check a key that is working. Observed live on 2026-11-11 for
+  // agnes-video-2.5 with a $0.10 balance and a $0.125 requirement.
+  if (status === 403 && /quota|balance|insufficient/i.test(detail === '' ? body : detail)) {
+    return new StudioError(
+      'quota-exceeded',
+      `Agnes 账户余额不足，无法完成这次生成${suffix}。Key 本身是有效的，充值后重试即可。`,
+      { upstreamStatus: status },
+    )
+  }
   if (status === 401 || status === 403) {
     return new StudioError('unauthorized', `Agnes API Key 无效或没有该模型的权限（HTTP ${status}）${suffix}`)
   }
@@ -64,7 +77,23 @@ export function fromUpstreamStatus(status: number, body: string): StudioError {
     return new StudioError('rate-limited', `请求太频繁，已被 Agnes 限流（HTTP 429）${suffix}`, {}, true)
   }
   if (status === 503 && /queue/i.test(detail === '' ? body : detail)) {
-    return new StudioError('queue-full', 'Agnes 视频队列已满，请稍后重试。', {}, true)
+    // The queue message is the only thing that tells the user this is a capacity
+    // condition rather than something wrong with their request, so it says so in
+    // as many words. The observed body is
+    // `{"code":"video_queue_full","message":"video queue is full, please retry
+    // later (request id: …)"}`; the request id is what support needs, so it is
+    // carried in `details` instead of being concatenated into the sentence.
+    const requestId = /request id:\s*([A-Za-z0-9_-]+)/.exec(detail)?.[1]
+    return new StudioError(
+      'queue-full',
+      'Agnes 视频队列已满：这是上游的并发容量限制，不是你的请求有问题，稍后重试即可。',
+      {
+        upstreamStatus: status,
+        ...(detail === '' ? {} : { upstreamDetail: detail }),
+        ...(requestId === undefined ? {} : { requestId }),
+      },
+      true,
+    )
   }
   if (status >= 500) {
     return new StudioError('upstream-failed', `Agnes 服务暂时不可用（HTTP ${status}）${suffix}`, {}, true)

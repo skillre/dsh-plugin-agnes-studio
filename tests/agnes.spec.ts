@@ -337,6 +337,29 @@ describe('upstream error mapping', () => {
     )
     expect(failure.code).toBe('queue-full')
     expect(failure.retryable).toBe(true)
+    // The message must say the cause is upstream capacity, not the request: a
+    // bare "queue is full" left the user unable to tell whether they did
+    // something wrong.
+    expect(failure.message).toContain('队列已满')
+    expect(failure.message).toContain('上游')
+    // The request id is what Agnes support asks for, so it is preserved.
+    expect(failure.details['requestId']).toBe('abc')
+  })
+
+  it('does not report an exhausted balance as an invalid key', () => {
+    // Observed live on 2026-11-11 for agnes-video-2.5: the video endpoint
+    // answers 403 `insufficient_user_quota`, which the generic 401/403 branch
+    // would have blamed on the API key while the key was working fine.
+    const failure = fromUpstreamStatus(
+      403,
+      '{"code":"insufficient_user_quota","message":"Failed to pre-consume quota, remaining: ＄0.100000, required: ＄0.125000 (request id: xyz)"}',
+    )
+    expect(failure.code).toBe('quota-exceeded')
+    expect(failure.message).toContain('余额不足')
+    expect(failure.message).not.toContain('Key 无效')
+    expect(failure.retryable).toBe(false)
+    // A genuine permission failure still reports as unauthorized.
+    expect(fromUpstreamStatus(403, '{"message":"no access to this model"}').code).toBe('unauthorized')
   })
 
   it('maps a validation rejection to invalid-parameter and keeps the detail', () => {
