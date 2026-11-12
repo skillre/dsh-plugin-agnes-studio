@@ -36,11 +36,21 @@ composer, and the picture itself is submitted as the next request's **reference 
 "Edit & retry": no retyping, the parameters return to the form for adjustment.
 
 A new version does **not** open another card: it joins the original as another layer of the same card.
-The badge reads "Version 2 of 3", the newest version sits on top, and the older ones peek out above it.
-**Move the pointer up and down over that thumbnail** to flip through versions — a preview only, nothing
-is written, and leaving the card returns to the newest. "Expand all versions" splits the lineage into
-ordinary cards, each with its own view, download and edit actions; "Collapse" stacks them again. What
-used to look like a row of unrelated cards now reads as one result that got better.
+The badge reads "Version 2 of 3", the newest version sits on top, and the older ones peek out above it
+showing **the edge of their own picture** rather than a grey decorative strip, so "there are other shots
+of this" is visible at a glance. Three gestures, none of which fights the others:
+
+- **Browse** — move the pointer up and down the picture to flip through versions. It is a preview only:
+  nothing is written, and leaving the card returns to the current version. The switch is a pure
+  crossfade — every version is already loaded and the card is always as tall as its tallest version —
+  so browsing **never flashes, shifts or resizes** the card, and the thing under the pointer stays put.
+- **Pin** — click one of the version numbers under the card to commit to that version (it survives the
+  pointer leaving), and its view / download / continue-editing / delete actions all act on it. Click
+  "1" to go back to following the newest version.
+- **Expand** — splits the lineage into ordinary cards, each with its own actions; "Collapse" stacks
+  them again.
+
+What used to look like a row of unrelated cards now reads as one result that got better.
 
 Finished videos are excluded: upstream has no endpoint that edits or extends an existing video, and its
 "reference video" input needs a publicly reachable URL and only the paid `agnes-video-2.5` accepts it,
@@ -196,14 +206,18 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 196 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 201 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering
   (including a retry turning its own card into the progress card with no placeholder added; a finished
   image filling the composer and submitting as a symbolic reference; a failed record restored for
   adjustment; a finished video offering no continuation), the **version stack** (lineage collapsing
   into one card, a single record growing no stack chrome, scrubbing down the picture switching versions
-  and snapping back on leave, expanding into standalone cards and collapsing again, an orphaned
-  continuation surviving its deleted source), **continuous retry** (only self-healing failures are
+  and snapping back on leave, a version change adding/removing/reordering NO node at all (the
+  structural guarantee against the old flicker), pinning a version from the rail and having it survive
+  the pointer leaving, the card's actions acting on the shown version, the peeking layers never
+  repeating the version already on the face of the stack, the newest and oldest versions staying
+  reachable across every version-count × picture-height combination, expanding into standalone cards and
+  collapsing again, an orphaned continuation surviving its deleted source), **continuous retry** (only self-healing failures are
   retried, the budget ending in ONE record that reports its attempt count, single-shot behaviour without
   the flag, the wait publishing its next attempt time, and the wire fence accepting `retryAll`),
   image-viewer interaction, the background-job lifecycle (state reporting a running job, a background
@@ -212,8 +226,8 @@ the command above if you no longer want the files.
 - Packed tarball installed into a disposable isolated profile: `--dump-config` composition, bounded
   real startup, authenticated `/api` calls, a real image generation downloaded through the media
   route, records and files surviving a restart, and the file disappearing after deletion.
-- Real headless Chrome driving the DSH Web app — 38 checks (the two retry, three continue-editing and
-  two version-stack checks need a real API key; without one they are skipped and reported as such): sidebar entry, panel render, the
+- Real headless Chrome driving the DSH Web app — 41 checks (the two retry, three continue-editing and
+  five version-stack checks need a real API key; without one they are skipped and reported as such): sidebar entry, panel render, the
   two-pane layout (measured: both panes side by side, the composer not spanning the panel), the
   model-derived controls **and their shape** (four resolutions are a segmented control, eight ratios
   are chips), Flash narrowing the resolution list, the generate button reachable without scrolling,
@@ -229,10 +243,20 @@ the command above if you no longer want the files.
   reading "Generate edit"; submitting really runs a `data:` URI image-to-image generation, adds one
   card, marks the new card with its lineage, and the store keeps the symbolic reference and
   `derivedFrom`), and the **version stack** (a continuation settling into its source's stack rather than
-  adding a sibling — card count unchanged, one stack, at least one peeking layer, a badge reporting two
-  versions and lineage on the top card; a real mouse move to the bottom of the thumbnail scrubbing to the
-  older version with the badge following, and leaving restoring the newest; Expand turning it into two
-  standalone cards and Collapse restoring the stack). Evidence is in `docs/evidence/`.
+  adding a sibling — card count unchanged, one stack, one peeking layer, two version numbers, a badge
+  reporting two versions and lineage on the top card; then a REAL mouse sweeps the picture through 7
+  positions and the card's and the picture's `getBoundingClientRect` must be identical at every one
+  (the machine-checkable form of "it flashed and shook", which jsdom cannot measure) while the sweep
+  must genuinely reach version 2; leaving restoring the newest; clicking version "2" pinning the older
+  version with the badge and rail following, surviving the pointer leaving, the card height unchanged,
+  and "1" returning to follow the newest; the stack re-rendered in the OTHER theme with its sliver
+  still painting a picture rather than turning transparent — the earlier theme screenshot predates any
+  stack, so this is the only place the dark stack is ever looked at; a deep SIX-version lineage is then
+  seeded and the page reloaded, requiring all six rail numbers to render with none clipped out of the
+  rail's box, the peek budget to stay capped at two, the badge to report six versions, the rail to reach
+  the oldest version, and a real scrub across the six-version picture to keep the card's measured box
+  identical; Expand turning it into two standalone cards and Collapse restoring the stack). Evidence is
+  in `docs/evidence/`.
 - Real-key end-to-end runs (not in CI): submit an image, leave the panel, come back while it is still
   rendering and see it running, then watch it settle into a result card; the same running job is still
   shown as running after a **full page reload**, then settles into a result card; submit a video that

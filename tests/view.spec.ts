@@ -11,7 +11,7 @@
 import { createElement } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { StudioPage, SidebarGlyph } from '../src/client/view.js'
+import { StudioPage, SidebarGlyph, scrubSlots } from '../src/client/view.js'
 import { dictFor, NAMESPACE, zh } from '../src/client/text.js'
 import type { ClientApi } from '../src/client/api.js'
 import type { Generation, MediaKind, StudioState } from '../src/types.js'
@@ -491,11 +491,24 @@ describe('version stack', () => {
     }
   }
 
-  /** The ids whose thumbnails are rendered inside a stack's front card. */
+  /**
+   * The thumbnails actually on the face of the stack.
+   *
+   * Every version's shot stays mounted so the crossfade is instant, so "which
+   * version is showing" is an opacity/visibility question, not a presence one:
+   * reading the DOM for an image would always return all of them.
+   */
   function frontSources(): string[] {
-    const front = document.querySelector('.agnes__stackFront')
-    if (front === null) return []
-    return [...front.querySelectorAll('img.agnes__thumb')].map((img) => img.getAttribute('src') ?? '')
+    const stack = document.querySelector('.agnes__stack')
+    if (stack === null) return []
+    return [...stack.querySelectorAll('.agnes__stackShot--on img.agnes__thumb')].map(
+      (img) => img.getAttribute('src') ?? '',
+    )
+  }
+
+  /** The version numbers the rail marks as current. */
+  function activePills(): string[] {
+    return [...document.querySelectorAll('.agnes__stackPill--on')].map((node) => node.textContent?.trim() ?? '')
   }
 
   it('renders a chain of continuations as ONE card, newest on top', async () => {
@@ -524,13 +537,13 @@ describe('version stack', () => {
     renderPanel({ generations: [only] })
     await screen.findByText('a lonely apple')
     expect(document.querySelector('.agnes__stack')).toBeNull()
-    expect(document.querySelectorAll('.agnes__stackLayer')).toHaveLength(0)
+    expect(document.querySelectorAll('.agnes__stackPeek')).toHaveLength(0)
     expect(screen.queryByRole('button', { name: translate('stack.expand') })).toBeNull()
     // Its ordinary actions are untouched.
     expect(screen.getByRole('button', { name: translate('gallery.continueEditing') })).toBeTruthy()
   })
 
-  it('switches versions as the pointer moves over the stack and restores on leave', async () => {
+  it('switches versions as the pointer moves over the picture and restores on leave', async () => {
     // Hover scrubbing is the whole point: comparing versions must not need a
     // click, and it must never commit anything.
     const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
@@ -540,21 +553,168 @@ describe('version stack', () => {
     expect(frontSources()).toEqual([v2.asset?.src])
 
     const stack = document.querySelector('.agnes__stack') as HTMLElement
-    const frame = stack.querySelector('.agnes__thumbButton') as HTMLElement
+    const media = stack.querySelector('.agnes__stackMedia') as HTMLElement
     // jsdom reports a zero-height box, so the band maths needs a real height.
-    Object.defineProperty(frame, 'getBoundingClientRect', {
-      value: () => ({ top: 0, left: 0, right: 200, bottom: 200, width: 200, height: 200, x: 0, y: 0, toJSON: () => ({}) }),
+    Object.defineProperty(media, 'getBoundingClientRect', {
+      value: () => ({ top: 100, left: 0, right: 200, bottom: 300, width: 200, height: 200, x: 0, y: 100, toJSON: () => ({}) }),
     })
-    // The gesture is scoped to the picture, not the action row: a card must not
-    // swap identity under a pointer that is about to click one of its buttons.
     // The lower half of the picture is the second-newest version.
-    fireEvent.mouseMove(frame, { clientY: 150, clientX: 100 })
+    fireEvent.mouseMove(stack, { clientY: 250, clientX: 100 })
     await waitFor(() => expect(frontSources()).toEqual([v1.asset?.src]))
     expect(screen.getByText(translate('stack.badge', { index: 2, total: 2 }))).toBeTruthy()
+    expect(activePills()).toEqual(['2'])
 
     // Leaving the stack snaps back to the newest version without changing data.
     fireEvent.mouseLeave(stack)
     await waitFor(() => expect(frontSources()).toEqual([v2.asset?.src]))
+    expect(activePills()).toEqual(['1'])
+  })
+
+  it('never animates or reflows the card when the version changes', async () => {
+    // The complaint this rewrite fixes: crossing a version boundary made the card
+    // flash and shift, because every version was a remount of the same card.
+    // The structural guarantee is that ALL versions are already mounted, one
+    // body grid cell sets the height, and only opacity/visibility change.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'a short one')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'a much, much longer prompt that wraps over several lines', v1.id)
+    renderPanel({ generations: [v2, v1] })
+    await screen.findByText(/a much, much longer/)
+
+    const stack = document.querySelector('.agnes__stack') as HTMLElement
+    // Both shots are mounted at all times: nothing is created or destroyed when
+    // the visible version changes, so no image is ever re-decoded mid-gesture.
+    expect(stack.querySelectorAll('.agnes__stackShot')).toHaveLength(2)
+    // Both bodies are mounted and share one grid cell, so the cell is as tall as
+    // the tallest version no matter which one is visible.
+    expect(stack.querySelectorAll('.agnes__stackBodies > .agnes__stackBody')).toHaveLength(2)
+    expect(document.querySelectorAll('.agnes__stackBodies')).toHaveLength(1)
+
+    const media = stack.querySelector('.agnes__stackMedia') as HTMLElement
+    Object.defineProperty(media, 'getBoundingClientRect', {
+      value: () => ({ top: 0, left: 0, right: 200, bottom: 200, width: 200, height: 200, x: 0, y: 0, toJSON: () => ({}) }),
+    })
+    const before = stack.innerHTML
+    fireEvent.mouseMove(stack, { clientY: 180, clientX: 100 })
+    await waitFor(() => expect(frontSources()).toEqual([v1.asset?.src]))
+    // The only markup difference is the state attributes (the class lists and the
+    // aria-hidden that hides the other shots and bodies): no node is added,
+    // removed or reordered, which is what rules out a remount.
+    // Structure only: every node, tag and attribute name, with the state
+    // attributes and all text content removed. The badge must say a different
+    // version and the active pill must move — that is the point of the swap —
+    // so neither may count as a structural change.
+    const shape = (html: string): string =>
+      html
+        .replace(/>[^<]*</g, '><')
+        .replace(/class="[^"]*"/g, 'class=""')
+        .replace(/ aria-hidden="[^"]*"/g, '')
+        .replace(/ aria-current="[^"]*"/g, '')
+        // The peek slivers show the versions that are NOT on the face of the
+        // stack, so their background changes with the visible version by design.
+        // They are 22px of paint behind the card and take no layout space.
+        .replace(/ style="[^"]*"/g, '')
+    expect(shape(stack.innerHTML)).toBe(shape(before))
+  })
+
+  it('commits to a version from the rail, and keeps it visible after the pointer leaves', async () => {
+    // Scrubbing is a preview; the rail is the precise control. Without a commit
+    // an older version's own actions (打开大图 / 下载 / 继续编辑 / 删除) would be
+    // unreachable without expanding the stack first.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'v2 prompt', v1.id)
+    const v3 = version('v3000000-0000-4000-8000-000000000003', 'v3 prompt', v2.id)
+    renderPanel({ generations: [v3, v2, v1] })
+    await screen.findByText('v3 prompt')
+    expect(frontSources()).toEqual([v3.asset?.src])
+
+    fireEvent.click(screen.getByRole('button', { name: translate('stack.version', { index: 2 }) }))
+    await waitFor(() => expect(frontSources()).toEqual([v2.asset?.src]))
+    // The pinned version survives the pointer leaving: that is what "commit"
+    // means, and it is what makes its action row usable.
+    fireEvent.mouseLeave(document.querySelector('.agnes__stack') as HTMLElement)
+    expect(frontSources()).toEqual([v2.asset?.src])
+
+    // Clicking the newest pill returns to following the newest version instead
+    // of pinning the newest, so the follow behaviour stays reachable.
+    fireEvent.click(screen.getByRole('button', { name: translate('stack.version', { index: 1 }) }))
+    await waitFor(() => expect(frontSources()).toEqual([v3.asset?.src]))
+  })
+
+  it('always makes the newest and oldest versions reachable by scrubbing', () => {
+    // The band maths is the one part of the gesture that can silently lose a
+    // version: a short picture split eight ways gives each version a band thinner
+    // than the pointer can resolve, so the slots coalesce instead of skipping.
+    // Whatever the geometry, two invariants must hold: the top of the picture is
+    // always the newest version, and the bottom is always the oldest.
+    for (const count of [2, 3, 5, 8, 20]) {
+      for (const height of [60, 110, 150, 240]) {
+        const slots = scrubSlots(count, height)
+        const bandOf = (ratio: number): number =>
+          slots[Math.min(slots.length - 1, Math.floor(ratio * slots.length))] as number
+        expect(bandOf(0)).toBe(0)
+        expect(bandOf(0.999)).toBe(count - 1)
+        // Coalescing may drop versions, but it must never invent one, and it must
+        // never drop the first or last.
+        expect(slots.length).toBeLessThanOrEqual(count)
+        expect(slots[0]).toBe(0)
+        expect(slots[slots.length - 1]).toBe(count - 1)
+        // Strictly increasing: a repeated slot would make two bands show the same
+        // version and one version unreachable for no reason.
+        for (let at = 1; at < slots.length; at += 1) expect(slots[at]).toBeGreaterThan(slots[at - 1] as number)
+      }
+    }
+  })
+
+  it('never peeks the version that is already on the face of the stack', async () => {
+    // With two versions, pinning version 1 leaves exactly one candidate sliver.
+    // Choosing it by position rather than by identity would show version 1's own
+    // picture above version 1, which reads as a rendering glitch rather than as
+    // depth.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'v2 prompt', v1.id)
+    renderPanel({ generations: [v2, v1] })
+    await screen.findByText('v2 prompt')
+
+    /** The picture sources painted on the peeking slivers. */
+    const peekSources = (): string[] =>
+      [...document.querySelectorAll('.agnes__stackPeek')].map(
+        (node) => /url\("?([^")]+)"?\)/.exec(node.getAttribute('style') ?? '')?.[1] ?? '',
+      )
+
+    // Newest on the face: the peek is the OLDER version.
+    expect(peekSources()).toEqual([v1.asset?.src])
+    fireEvent.click(screen.getByRole('button', { name: translate('stack.version', { index: 2 }) }))
+    await waitFor(() => expect(frontSources()).toEqual([v1.asset?.src]))
+    // Older on the face: the peek flips to the newer version, never repeating it.
+    expect(peekSources()).toEqual([v2.asset?.src])
+    expect(document.querySelectorAll('.agnes__stackPeek')).toHaveLength(1)
+  })
+
+  it('acts on the version the user is looking at, not on the head', async () => {
+    // The pinned version IS the card: its download link, its prompt and its
+    // continue-editing action must all describe that version.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'the older prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'the newer prompt', v1.id)
+    renderPanel({ generations: [v2, v1] })
+    await screen.findByText('the newer prompt')
+
+    fireEvent.click(screen.getByRole('button', { name: translate('stack.version', { index: 2 }) }))
+    await waitFor(() => expect(screen.getByText('the older prompt')).toBeTruthy())
+    // Exactly one reachable action row, and it belongs to the pinned version:
+    // the hidden bodies are aria-hidden, so a screen reader and a role query see
+    // one card's worth of actions rather than one per version.
+    expect(screen.getAllByRole('button', { name: translate('gallery.continueEditing') })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: translate('gallery.delete') })).toHaveLength(1)
+    const visible = [...document.querySelectorAll('.agnes__stackBody')].filter(
+      (node) => !node.classList.contains('agnes__stackBody--off'),
+    )
+    expect(visible).toHaveLength(1)
+    expect(visible[0]?.textContent).toContain('the older prompt')
+    // And the hidden body really is still in the DOM (that is the anti-jump
+    // guarantee), just not exposed.
+    expect(document.querySelectorAll('.agnes__stackBody')).toHaveLength(2)
+    // The picture shown is the older version's.
+    expect(frontSources()).toEqual([v1.asset?.src])
   })
 
   it('expands every version into its own card and collapses back', async () => {

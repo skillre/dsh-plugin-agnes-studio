@@ -223,3 +223,59 @@ export async function appendFailedGeneration(dataDir, options = {}) {
   )
   return generation
 }
+
+/**
+ * Seed a DEEP lineage: one root plus `count - 1` continuations.
+ *
+ * The version stack has to stay usable for a real chain — a rail that clips, a
+ * peek budget that grows unbounded, or a scrub band that skips versions all show
+ * up here and nowhere else, because the interactive suite would otherwise only
+ * ever see a chain of two.
+ */
+export async function seedChain(dataDir, count = 6, options = {}) {
+  const { size = 512 } = options
+  const mediaDir = join(dataDir, 'media')
+  await mkdir(mediaDir, { recursive: true })
+  const png = fixturePng(size)
+  const generations = []
+  let parent
+  for (let index = 0; index < count; index += 1) {
+    // A real hex UUID shape: the Host re-validates every media id with the same
+    // pattern (see isStoreId in src/store.ts), and a fixture id that fails it
+    // renders a card with no picture and a broken stack.
+    const id = `0000000${index}-0000-4000-8000-00000000000${index}`
+    await writeFile(join(mediaDir, `${id}.png`), png)
+    const createdAt = new Date(Date.parse('2026-11-11T00:00:00.000Z') + index * 60_000).toISOString()
+    const generation = {
+      id,
+      kind: 'image',
+      status: 'succeeded',
+      model: 'agnes-image-2.5-flash',
+      // A per-version prompt, so "which version is showing" is readable in a
+      // screenshot as well as in the DOM.
+      prompt: `链条第 ${String(index + 1)} 版`,
+      params: { size: '1K', ratio: '1:1', references: index === 0 ? 0 : 1 },
+      createdAt,
+      finishedAt: createdAt,
+      durationMs: 12_000,
+      asset: { src: `/api/agnes-studio/media?id=${encodeURIComponent(id)}`, mediaType: 'image/png', bytes: png.length, width: size, height: size },
+      ...(parent === undefined
+        ? {}
+        : {
+            derivedFrom: parent,
+            request: {
+              kind: 'image',
+              prompt: `链条第 ${String(index + 1)} 版`,
+              model: 'agnes-image-2.5-flash',
+              size: '1K',
+              ratio: '1:1',
+              references: [{ kind: 'image', generationId: parent }],
+            },
+          }),
+    }
+    generations.unshift(generation)
+    parent = id
+  }
+  await writeFile(join(dataDir, 'index.json'), JSON.stringify({ version: 1, generations }), 'utf8')
+  return generations
+}

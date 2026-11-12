@@ -1,5 +1,5 @@
 {
-  "at": "2026-11-12T04:11:04.246Z",
+  "at": "2026-11-12T09:29:38.947Z",
   "dsh": "unknown",
   "checks": [
     "browser-app-boot",
@@ -36,9 +36,12 @@
     "browser-retry-settles-in-place: 3 images, 3 cards",
     "browser-continue-editing-prefills: source thumbnail, prompt and card count preserved",
     "browser-continue-editing-settles: 3 cards, 1 stack of 2 versions, lineage on top",
-    "browser-stack-hover-scrub: older version on hover, newest restored on leave",
+    "browser-stack-hover-scrub: swept 7 bands, card box constant",
+    "browser-stack-rail-pin: older version pinned, box unchanged, newest restored",
+    "browser-stack-dark-theme: peek renders its picture in the dark theme",
     "browser-stack-expand-collapse: 4 cards expanded, 3 stacked",
     "browser-continue-editing-lineage: derivedFrom + symbolic reference kept in the store",
+    "browser-stack-deep-chain: 6 versions, 6 records, rail unclipped, height constant",
     "browser-console-clean"
   ]
 }

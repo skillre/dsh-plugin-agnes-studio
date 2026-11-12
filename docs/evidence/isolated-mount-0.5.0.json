@@ -4,18 +4,18 @@
   "dsh": "0.2.2-rc.1",
   "tarball": {
     "path": "/Users/skillre/dsh-plugins/repos/dsh-plugin-agnes-studio/skillre-dsh-plugin-agnes-studio-0.5.0.tgz",
-    "sha256": "ff8abe068fade86ba092b95f31be0431059e8b1069fe132b6a0f591e9abfe415"
+    "sha256": "d4a32c6336655bc2c56a738c6857ba51a5f33f7313537454f1dba770e33c091d"
   },
-  "profile": "agnes-studio-test-2245a237",
+  "profile": "agnes-studio-test-7a780164",
   "checks": [
     "command: dsh --version -> exit 0",
     "dsh-version",
-    "command: dsh --profile agnes-studio-test-2245a237 --from-default-profile web --dump-config -> exit 0",
+    "command: dsh --profile agnes-studio-test-7a780164 --from-default-profile web --dump-config -> exit 0",
     "profile-template-created",
-    "command: dsh plugin --profile agnes-studio-test-2245a237 add /Users/skillre/dsh-plugins/repos/dsh-plugin-agnes-studio/skillre-dsh-plugin-agnes-studio-0.5.0.tgz --ignore-scripts --store-dir /private/var/folders/k5/plnkf7qs5992_9713c_b34nc0000gn/T/dsh-agnes-studio-mount-1QDPi6/pnpm-store -> exit 0",
+    "command: dsh plugin --profile agnes-studio-test-7a780164 add /Users/skillre/dsh-plugins/repos/dsh-plugin-agnes-studio/skillre-dsh-plugin-agnes-studio-0.5.0.tgz --ignore-scripts --store-dir /private/var/folders/k5/plnkf7qs5992_9713c_b34nc0000gn/T/dsh-agnes-studio-mount-3MF0S6/pnpm-store -> exit 0",
     "profile-tarball-install",
     "packed-dependency-and-selection",
-    "command: dsh --profile agnes-studio-test-2245a237 --dump-config -> exit 0",
+    "command: dsh --profile agnes-studio-test-7a780164 --dump-config -> exit 0",
     "dump-config",
     "packed-payload-present",
     "bounded-startup",
@@ -39,19 +39,19 @@
       "models": 0
     },
     "generate": {
-      "id": "0f1e8a49-20bf-4b64-8cc9-f1c52e856bdb",
+      "id": "366c3228-21c1-42e7-9177-91e27a10a71f",
       "mediaType": "image/png",
-      "bytes": 1002692,
-      "durationMs": 16567
+      "bytes": 892471,
+      "durationMs": 15102
     },
     "media": {
-      "bytes": 1002692,
+      "bytes": 892471,
       "contentType": "image/png"
     }
   },
   "cleanup": {
-    "ownedRoot": "/private/var/folders/k5/plnkf7qs5992_9713c_b34nc0000gn/T/dsh-agnes-studio-mount-1QDPi6",
-    "profile": "agnes-studio-test-2245a237",
+    "ownedRoot": "/private/var/folders/k5/plnkf7qs5992_9713c_b34nc0000gn/T/dsh-agnes-studio-mount-3MF0S6",
+    "profile": "agnes-studio-test-7a780164",
     "processesStopped": true,
     "rootRemoved": true,
     "verified": true

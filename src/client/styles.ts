@@ -1282,11 +1282,18 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
 /* ---------------------------------------------------------------------------
    Version stack
    ---------------------------------------------------------------------------
-   A lineage ("继续编辑" runs on top of each other) is ONE gallery cell whose
-   back versions peek out above the front card. The peeks are pure decoration
-   drawn behind it: they offset upward and inward so the pile reads as depth
-   rather than as a taller card, and they never take the pointer because the
-   scrub gesture needs the whole cell.
+   A lineage ("继续编辑" runs) is ONE gallery cell. Two things have to be true at
+   once, and the first attempt at this got both wrong:
+
+   1. It must not move while the pointer is on it. Every version's shot and body
+      stay mounted, ALL bodies share one grid cell (so the card is always as tall
+      as its tallest version), the picture is a fixed 4:3 box, and the front card
+      never runs the generic .agnes__card:hover lift. Version switching is
+      therefore an opacity crossfade with no reflow — scrubbing cannot make the
+      card jump, flash, or chase the pointer.
+   2. It must be operable, not just decorative. The numbered rail commits to a
+      version (including its action row), the peeks announce the pile, and 展开
+      is the everything-at-once view.
    ------------------------------------------------------------------------- */
 .agnes__stack {
   position: relative;
@@ -1294,44 +1301,116 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  /* Two peeks offset upward by 6px each; reserving the space keeps a deep chain
+     from overlapping the row above it in the grid. */
+  padding-top: 13px;
 }
-/* Reserve the two 8px strips above the front card, so a deep chain never
-   overlaps whatever sits above it in the grid. */
-.agnes__stack--layered { padding-top: 16px; }
-.agnes__stackLayer {
+
+/* The peeks: the top edge of the next two versions, cropped to a sliver.
+   They carry the BACK versions' own pictures, so the pile reads as "other shots
+   of this result" rather than as a decorative grey bar. Each is inset a little
+   more than the one in front of it and rises 6px higher, which is what makes
+   the depth read at all. */
+.agnes__stackPeek {
   position: absolute;
-  height: 80px;
-  border: 1px solid color-mix(in srgb, var(--a-fg) 20%, transparent);
-  border-radius: var(--a-radius);
-  /* Mixed from the foreground rather than a surface token: the gallery sits on
-     the page background, and a white-on-white peek is invisible in the light
-     theme, which is the one place the stack most needs to read as a pile. */
-  background: color-mix(in srgb, var(--a-fg) 7%, var(--a-surface));
+  height: 22px;
+  border: 1px solid color-mix(in srgb, var(--a-fg) 14%, transparent);
+  border-radius: var(--a-radius) var(--a-radius) 0 0;
+  /* The picture is the background; the solid colour underneath is what shows
+     when a version has no image (a failed record in the chain). */
+  background-color: color-mix(in srgb, var(--a-fg) 8%, var(--a-surface));
+  background-size: cover;
+  background-position: center top;
+  /* The sliver would otherwise be the loudest thing in the cell, because a
+     saturated 22px strip of a photo reads as a banner. Dimming and fading it
+     into the card keeps it a suggestion of depth. */
+  filter: saturate(0.55);
+  opacity: 0.9;
+  /* Decoration only: a peek that took the pointer would dead-zone the scrub. */
   pointer-events: none;
 }
-/* Two fixed peeks (see STACK_PEEK). The layer nearest the front is wider and
-   lower; the one behind is narrower and higher, so the pile reads as depth.
-   Both are painted behind the opaque front card, which is why only the strips
-   above it are visible — the declaration order is intentionally the reverse of
-   the visual order. */
-.agnes__stackLayer:nth-child(1) {
-  z-index: 2;
-  top: 8px;
-  left: 8px;
-  right: 8px;
-}
-.agnes__stackLayer:nth-child(2) {
-  z-index: 1;
-  top: 0;
-  left: 17px;
-  right: 17px;
-}
-.agnes__stackFront { position: relative; z-index: 3; }
-.agnes__stackFront .agnes__card { box-shadow: var(--a-shadow); }
+.agnes__stackPeek[data-layer='0'] { top: 6px; left: 12px; right: 12px; z-index: 2; opacity: 0.8; }
+.agnes__stackPeek[data-layer='1'] { top: 0; left: 24px; right: 24px; z-index: 1; opacity: 0.62; }
+/* A one-deep pile has nothing behind it: a single sliver would read as a stray
+   strip above the card rather than as depth. */
+.agnes__stack[data-peeks='1'] .agnes__stackPeek[data-layer='1'] { display: none; }
 
-/* The badge states which version is on top. It sits in the card's own top-left
-   corner so it is unmissable, but it is not a button: scrubbing is the
-   interaction, and a click target here would compete with the thumbnail. */
+/* The front card. It is the only element that carries the card surface, so the
+   peeks behind it stay a suggestion rather than a second visible box. */
+.agnes__card--stacked {
+  position: relative;
+  z-index: 3;
+  background: var(--a-surface);
+  box-shadow: var(--a-shadow-lift);
+}
+/* The generic card lift is deliberately cancelled here: a card that rises 1px
+   under a pointer that is scrubbing it is the exact "it wobbles" complaint. The
+   border highlight below is a paint-only cue, so it costs no layout. */
+.agnes__card--stacked:hover {
+  transform: none;
+  border-color: var(--a-border-strong);
+  box-shadow: var(--a-shadow-lift);
+}
+
+/* The picture area. Fixed 4:3 via the frame inside every shot, so the stack's
+   height is a constant of the layout rather than a function of which version is
+   showing. The badge sits above every shot and never fades. */
+.agnes__stackMedia {
+  position: relative;
+  cursor: ns-resize;
+}
+.agnes__stackShot {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  visibility: hidden;
+  /* Only the incoming shot animates, and only its opacity: a transform or a
+     size change here would reintroduce movement under the pointer. The
+     visibility flip is delayed by exactly the fade-out so the outgoing picture
+     is still painted while it dims (a crossfade, not a blink). */
+  transition: opacity 130ms ease-out, visibility 0s linear 130ms;
+  will-change: opacity;
+}
+.agnes__stackShot:first-child {
+  /* The first shot defines the area's height; the rest are absolutely stacked
+     over it. Without a static one the container would collapse to 0. */
+  position: relative;
+}
+.agnes__stackShot--on {
+  opacity: 1;
+  visibility: visible;
+  /* No delay on the way in: the fade starts on the same frame as the switch. */
+  transition: opacity 130ms ease-out, visibility 0s;
+  /* The visible shot is the only one in the hit-test path, so the picture's own
+     打开大图 button belongs to the version the user is looking at. Hidden shots
+     stay in the DOM (that is what keeps their decode alive) but are unreachable
+     by pointer, by tab and by screen reader. */
+  z-index: 1;
+}
+
+/* Every body shares ONE grid cell. The tallest version therefore sets the card's
+   height, and switching versions shifts nothing. */
+.agnes__stackBodies {
+  position: relative;
+  display: grid;
+  grid-template-areas: 'body';
+}
+.agnes__stackBody {
+  grid-area: body;
+  min-width: 0;
+}
+.agnes__stackBody--off {
+  /* visibility rather than display:none or content-visibility:hidden on
+     purpose: those two remove the box, which would collapse the shared grid
+     cell and make the card shrink and grow as the pointer crosses versions —
+     the exact jump this redesign removes. visibility:hidden keeps the geometry
+     while still taking the content out of the hit test, the tab order and the
+     accessibility tree. */
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* The version badge: which version is on the face of the stack right now. */
 .agnes__stackBadge {
   position: absolute;
   z-index: 4;
@@ -1350,30 +1429,113 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
+
+/* The gesture affordance: shown while the pointer is over the picture, and
+   retired as soon as the user has actually flipped a version, because at that
+   point the badge is already explaining what happened. */
+.agnes__stackScrubHint {
+  position: absolute;
+  z-index: 4;
+  right: 7px;
+  bottom: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(12, 14, 20, 0.62);
+  backdrop-filter: blur(6px);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 130ms ease-out, transform 130ms ease-out;
+  pointer-events: none;
+}
+.agnes__stackMedia:hover .agnes__stackScrubHint { opacity: 1; transform: none; }
+/* Once the pointer has committed to flipping, the label has done its job. */
+.agnes__stack[data-scrubbing='true'] .agnes__stackScrubHint { opacity: 0; transition: opacity 90ms ease-out; }
+@media (hover: none) {
+  /* Touch has no hover, and the scrub gesture does not exist there: the rail is
+     the control, so the hint never appears. */
+  .agnes__stackScrubHint { display: none; }
+}
+
+/* Inside a stack the picture is a scrub surface first and a button second.
+   The generic card's thumbnail affordances fight both: the 2.5% zoom is a
+   transform under a pointer that is trying to read a version boundary, and the
+   "查看大图" veil covers the very region the scrub hint occupies. The action row
+   still offers 查看大图, so nothing becomes unreachable — and the picture keeps
+   its click, because clicking it still opens the viewer. */
+.agnes__stackMedia .agnes__thumbButton { cursor: ns-resize; }
+.agnes__stackMedia .agnes__thumbButton:hover .agnes__thumb { transform: none; }
+.agnes__stackMedia .agnes__thumbVeil { display: none; }
+
+/* The bar under the card: the version rail on the left, expanding on the right.
+   A fixed min-height keeps the gallery rhythm when the pending strip appears. */
 .agnes__stackBar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 2px;
-}
-/* The hint is the lowest-value text in the cell, so it gives way first: it
-   truncates, and the whole sentence stays available as the title attribute. The
-   expand label never wraps or truncates — it is a button the user must be able
-   to read. */
-.agnes__stackHint {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 1px;
 }
 .agnes__stackBar .agnes__open { flex: none; padding: 0 6px; font-size: 10.5px; white-space: nowrap; }
 
-/* The "a new version is being generated" strip under a stack. */
+/* The version rail. Clicking a pill COMMITS to that version, which is the
+   precise counterpart to the scrubbing gesture: a 150px picture split into eight
+   bands is fine for browsing and useless for "show me version 3". */
+.agnes__stackPills {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+  /* The rail is the PRECISE control, so it may never clip a version away: a long
+     chain wraps onto a second row of numbers instead of hiding the tail. Its bar
+     grows with it; the card itself does not move, because the bar lives outside
+     the card in the cell's own column. */
+}
+.agnes__stackPill {
+  appearance: none;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--a-fg-3);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 110ms ease, color 110ms ease, border-color 110ms ease;
+}
+.agnes__stackPill:hover { background: color-mix(in srgb, var(--a-fg) 8%, transparent); color: var(--a-fg); }
+.agnes__stackPill--on {
+  /* Colour only — no border, no size change: the rail must not reflow when the
+     active version changes, or the pills would slide out from the pointer. */
+  background: var(--a-accent-soft);
+  color: var(--a-accent);
+}
+.agnes__stackPill:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 1px; }
+
+/* The "a new version is being generated" strip, inline with the rail so it does
+   not add a row that would make the card jump when it appears. */
 .agnes__stackPending {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 2px;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-size: 10.5px;
   font-weight: 550;
   color: var(--a-accent);

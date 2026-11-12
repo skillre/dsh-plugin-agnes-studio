@@ -412,6 +412,13 @@ const IconLayers = (): JSX.Element => (
   </Glyph>
 )
 
+const IconFlip = (): JSX.Element => (
+  <Glyph size={11}>
+    <path d="M8 9.5 12 5.5l4 4" />
+    <path d="M8 14.5l4 4 4-4" />
+  </Glyph>
+)
+
 const IconFrame = (): JSX.Element => (
   <Glyph size={20}>
     <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
@@ -1298,21 +1305,64 @@ export function chainsOf(generations: readonly Generation[]): VersionChain[] {
 /**
  * How many versions behind the front are drawn as peeking layers.
  *
- * Two is enough to read as "a pile" without pushing the front card out of the
- * gallery rhythm; the badge states the real count.
+ * Two is enough to read as a pile of sheets; the badge and the pills state the
+ * real count, so a chain of eight does not need eight layers of decoration.
  */
 const STACK_PEEK = 2
 
 /**
+ * The narrowest vertical band, in CSS pixels, that one version may occupy.
+ *
+ * A chain of eight versions over a 150px picture would otherwise give each
+ * version an 18px band, and the pointer would skip three versions while crossing
+ * one line of text. Coalescing the bands keeps every reachable version worth a
+ * deliberate move; the pills stay the precise control.
+ */
+const SCRUB_MIN_BAND = 14
+
+/**
+ * The version indices a vertical scrub can land on.
+ *
+ * The oldest version is always a slot, even when the stride would skip past it: a
+ * gesture that cannot reach the end of the chain reads as broken rather than as
+ * imprecise.
+ */
+export function scrubSlots(count: number, height: number): number[] {
+  const stride = Math.max(1, Math.ceil(SCRUB_MIN_BAND / (height / count)))
+  const slots: number[] = []
+  for (let at = 0; at < count - 1; at += stride) slots.push(at)
+  slots.push(count - 1)
+  return slots
+}
+
+/**
  * One lineage rendered as a stack of versions.
  *
- * Interaction contract, chosen to make a chain discoverable without a menu:
- * - hovering the stack and moving vertically SCRUBS the visible version (a
- *   preview; nothing is committed), then it snaps back to the newest on leave;
- * - the expand button swaps the stack for the individual cards, which is the
- *   only way to reach a specific version's own actions;
- * - a single-version chain renders as a plain card, so ordinary results do not
- *   grow stack chrome they can never use.
+ * ## Interaction contract
+ *
+ * Two gestures, because they answer two different needs:
+ *
+ * - **Look.** Moving the pointer over the picture scrubs through the versions
+ *   (the top band is the newest). It is a preview and it commits nothing; the
+ *   pointer leaving the whole stack returns to the committed version.
+ * - **Commit.** Clicking a numbered pill makes that version the card's subject,
+ *   including its action row, so an older version can be opened, downloaded,
+ *   continued or deleted without expanding the stack first.
+ *
+ * Plus one escape hatch: 展开 replaces the stack with one card per version, which
+ * is the only view where every version's actions are visible at once.
+ *
+ * ## Why the card is layered instead of re-rendered
+ *
+ * The first version of this component swapped `generation` on one card, and it
+ * shook: React remounted the card on every band crossing, which replaced the
+ * <img> element (a fresh element means a fresh decode and an empty frame), reset
+ * the CSS hover transition, and let a taller facts row change the card's height —
+ * so the pointer was scrubbing a target that moved and flashed under it. Here
+ * every version keeps its own media and body mounted, only one of each is
+ * visible, and the picture area is a fixed aspect ratio. Version changes are then
+ * a pure crossfade with zero layout movement, which is what makes the gesture
+ * feel like flipping through prints rather than watching the card flicker.
  */
 function VersionStack(props: {
   t: Translate
@@ -1332,40 +1382,78 @@ function VersionStack(props: {
   /** The record a new version is currently being generated FROM, if any. */
   pendingFrom: string | undefined
 }): JSX.Element {
-  const { t, chain, expanded, onExpand, pendingFrom, ...rest } = props
+  const { t, chain, expanded, onExpand, pendingFrom, disabled, refiningId } = props
   const { members, head } = chain
-  // Index 0 is the newest version; the badge counts from 1 for humans.
-  const [shown, setShown] = useState(0)
+  /**
+   * The version the user committed to, or null for "whatever is newest".
+   *
+   * Held as a record id rather than an index on purpose: a new version settling
+   * shifts every index by one, and an index-based pin would silently slide to a
+   * different picture exactly when the user is watching the new one arrive.
+   */
+  const [pinnedId, setPinnedId] = useState<string | null>(null)
+  /** The version under the pointer right now, or null when not scrubbing. */
+  const [previewId, setPreviewId] = useState<string | null>(null)
+  const frameRef = useRef<HTMLDivElement | null>(null)
 
-  // The stack can shrink under the pointer (a version deleted, evicted, or a new
-  // one arriving which pushes everything down one slot), so the preview index has
-  // to be clamped instead of trusted.
-  const index = Math.min(shown, Math.max(0, members.length - 1))
+  const wanted = previewId ?? pinnedId
+  const at = wanted === null ? -1 : members.findIndex((member) => member.id === wanted)
+  // A pinned or previewed version can be deleted or evicted while it is on
+  // screen, so the resolved index is clamped instead of trusted.
+  const index = at < 0 ? 0 : at
   const current = members[index] ?? head
+  const retryJobOf = (generation: Generation): RunningJob | undefined => props.retryJobs.get(generation.id)
 
-  useEffect(() => {
-    if (shown > members.length - 1) setShown(0)
-  }, [members.length, shown])
-
-  const cardFor = (generation: Generation): JSX.Element => (
-    <GenerationCard
-      key={generation.id}
+  /** One version's media, with its own retry/refining state. */
+  const mediaOf = (generation: Generation): JSX.Element => (
+    <CardMedia
       t={t}
       generation={generation}
-      retrying={rest.retryingIds.has(generation.id)}
-      {...(rest.retryJobs.get(generation.id) === undefined ? {} : { retryJob: rest.retryJobs.get(generation.id) as RunningJob })}
-      refining={rest.refiningId === generation.id}
-      disabled={rest.disabled}
-      onDelete={rest.onDelete}
-      onRetry={rest.onRetry}
-      onRetryAll={rest.onRetryAll}
-      onCancelJob={() => rest.onCancelJob(generation)}
-      onOpen={rest.onOpen}
-      onEdit={rest.onEdit}
+      retrying={props.retryingIds.has(generation.id)}
+      retryJob={retryJobOf(generation)}
+      eager
+      onOpen={props.onOpen}
     />
   )
 
-  if (members.length === 1) return cardFor(head)
+  /** One version's body and actions, acting on that version only. */
+  const bodyOf = (generation: Generation): JSX.Element => (
+    <CardBody
+      t={t}
+      generation={generation}
+      retrying={props.retryingIds.has(generation.id)}
+      retryJob={retryJobOf(generation)}
+      refining={refiningId === generation.id}
+      disabled={disabled}
+      onDelete={props.onDelete}
+      onRetry={props.onRetry}
+      onRetryAll={props.onRetryAll}
+      onCancelJob={() => props.onCancelJob(generation)}
+      onOpen={props.onOpen}
+      onEdit={props.onEdit}
+    />
+  )
+
+  // One version is not a stack: it keeps the ordinary card, chrome free.
+  if (members.length === 1) {
+    const job = retryJobOf(head)
+    return (
+      <GenerationCard
+        t={t}
+        generation={head}
+        retrying={props.retryingIds.has(head.id)}
+        {...(job === undefined ? {} : { retryJob: job })}
+        refining={refiningId === head.id}
+        disabled={disabled}
+        onDelete={props.onDelete}
+        onRetry={props.onRetry}
+        onRetryAll={props.onRetryAll}
+        onCancelJob={() => props.onCancelJob(head)}
+        onOpen={props.onOpen}
+        onEdit={props.onEdit}
+      />
+    )
+  }
 
   /*
    * Expanded: the lineage becomes a header strip plus one ordinary card per
@@ -1387,67 +1475,176 @@ function VersionStack(props: {
             {t('stack.collapse')}
           </button>
         </div>
-        {members.map((member) => cardFor(member))}
+        {members.map((member) => {
+          const job = retryJobOf(member)
+          return (
+            <GenerationCard
+              key={member.id}
+              t={t}
+              generation={member}
+              retrying={props.retryingIds.has(member.id)}
+              {...(job === undefined ? {} : { retryJob: job })}
+              refining={refiningId === member.id}
+              disabled={disabled}
+              onDelete={props.onDelete}
+              onRetry={props.onRetry}
+              onRetryAll={props.onRetryAll}
+              onCancelJob={() => props.onCancelJob(member)}
+              onOpen={props.onOpen}
+              onEdit={props.onEdit}
+            />
+          )
+        })}
       </>
     )
   }
 
   /**
-   * Map a pointer position inside the front card's PICTURE to a version index.
+   * Scrub: the pointer's vertical position over the PICTURE picks a version.
    *
-   * Vertical bands over the picture, newest at the top: the topmost band is the
-   * version already on top, so the gesture starts where the eye already is and
-   * moving down reaches further back in time. One band per version (rather than
-   * a fixed pixel step) keeps the gesture identical for 2 or 8 versions.
-   *
-   * Deliberately scoped to the thumbnail: scrubbing from the action row would
-   * swap the card's identity out from under a pointer that is about to click one
-   * of its buttons.
+   * Scoped to the picture rather than the whole card, because the action row is
+   * where the user is heading to click something. Once a version is previewed it
+   * stays previewed until the pointer leaves the stack entirely — otherwise
+   * travelling from the picture down to the buttons would silently swap the
+   * buttons out from under the pointer.
    */
-  const onMove = (event: ReactMouseEvent<HTMLDivElement>): void => {
-    if (members.length < 2) return
-    const target = event.target as Element | null
-    const frame = target?.closest?.('.agnes__thumbFrame, .agnes__thumbButton') ?? null
+  const onMove = (event: ReactMouseEvent<HTMLElement>): void => {
+    const frame = frameRef.current
     if (frame === null) return
     const box = frame.getBoundingClientRect()
     if (box.height <= 0) return
-    const ratio = Math.min(0.999, Math.max(0, (event.clientY - box.top) / box.height))
-    const next = Math.min(members.length - 1, Math.floor(ratio * members.length))
-    if (next !== index) setShown(next)
+    if (event.clientY < box.top || event.clientY > box.bottom) return
+    const ratio = Math.min(1, Math.max(0, (event.clientY - box.top) / box.height))
+    const slots = scrubSlots(members.length, box.height)
+    const slot = slots[Math.min(slots.length - 1, Math.floor(ratio * slots.length))]
+    const next = slot === undefined ? undefined : members[slot]
+    if (next === undefined || next.id === current.id) return
+    setPreviewId(next.id)
   }
 
-  const peeks = Math.min(STACK_PEEK, members.length - 1)
+  /**
+   * The versions drawn as slivers behind the front card.
+   *
+   * Chosen by EXCLUSION of the visible version rather than by position: pinning
+   * version 1 of a two-version chain would otherwise peek version 1 again, so the
+   * pile would show the same picture twice and the depth would read as a glitch.
+   * Excluding the current version also means the slivers are always of versions
+   * the user is not already looking at, which is what makes them worth showing.
+   */
+  const peekMembers = members.filter((member) => member.id !== current.id).slice(0, STACK_PEEK)
+  const peeks = peekMembers.length
   return (
     <div
-      className={`agnes__stack${peeks > 0 ? ' agnes__stack--layered' : ''}`}
+      className="agnes__stack agnes__stack--layered"
+      data-peeks={peeks}
+      data-scrubbing={previewId === null ? 'false' : 'true'}
+      /* Leaving the stack is the one thing that returns to the committed
+         version: leaving just the picture must not, because the action row sits
+         directly below it. */
+      onMouseLeave={() => setPreviewId(null)}
       onMouseMove={onMove}
-      onMouseLeave={() => setShown(0)}
     >
-      {/* The peeking layers are decoration only: they must not steal the
-          pointer, or scrubbing would stop working exactly where the stack looks
-          three deep. */}
-      {Array.from({ length: peeks }, (_unused, layer) => (
-        <span className="agnes__stackLayer" key={layer} aria-hidden="true" />
+      {/* The peeks are slivers of the versions behind the front one, cropped to
+          their top edge: greyscale lines say "decoration", the actual pictures
+          say "there are other shots of this, stacked". Decoration only — a peek
+          that took the pointer would dead-zone the scrub exactly where the stack
+          looks three deep. */}
+      {peekMembers.map((member, layer) => (
+        <span
+          key={member.id}
+          className="agnes__stackPeek"
+          data-layer={layer}
+          aria-hidden="true"
+          {...(member.asset === undefined || member.kind !== 'image'
+            ? {}
+            : { style: { backgroundImage: `url("${member.asset.src}")` } })}
+        />
       ))}
-      <div className="agnes__stackFront">
-        <div className="agnes__stackBadge">
-          <IconLayers />
-          {t('stack.badge', { index: index + 1, total: members.length })}
+      <article className={cardClassName(current, props.retryingIds.has(current.id), refiningId === current.id, ' agnes__card--stacked')}>
+        <div className="agnes__stackMedia" ref={frameRef} title={t('stack.hoverHint')}>
+          {members.map((member, position) => (
+            <div
+              key={member.id}
+              className={position === index ? 'agnes__stackShot agnes__stackShot--on' : 'agnes__stackShot'}
+              /* Only the visible version is exposed: the hidden ones are still
+                 in the DOM (that is what makes the crossfade instant), and
+                 without this they would duplicate every button and every
+                 picture description for a screen reader and for role queries. */
+              aria-hidden={position === index ? undefined : 'true'}
+            >
+              {mediaOf(member)}
+            </div>
+          ))}
+          <div className="agnes__stackBadge">
+            <IconLayers />
+            {t('stack.badge', { index: index + 1, total: members.length })}
+          </div>
+          {/* The gesture is invisible until someone tries it, so the picture
+              advertises it on hover. It is rendered unconditionally and shown by
+              CSS so that entering the stack never costs a React render, and it
+              fades out the moment the user actually scrubs — the badge takes
+              over from there, and a permanent label would just be clutter. */}
+          <div className="agnes__stackScrubHint" aria-hidden="true">
+            <IconFlip />
+            {t('stack.scrubHint')}
+          </div>
         </div>
-        {cardFor(current)}
-      </div>
-      {/* A new version being generated from one of these results is part of the
-          story, so the stack says so. The placeholder card itself stays in the
-          grid: it is a JOB with no record yet, and hiding it would make the panel
-          look idle while work is really running. */}
-      {pendingFrom === undefined ? null : (
-        <div className="agnes__stackPending" role="status">
-          <span className="agnes__spinner" aria-hidden="true" />
-          {t('stack.pending')}
+        {/*
+         * Every body shares one grid cell, so the card is always as tall as its
+         * tallest version and scrubbing between versions cannot change its
+         * height. That is the layout half of "it shook".
+         */}
+        <div className="agnes__stackBodies">
+          {members.map((member, position) => (
+            <div
+              key={member.id}
+              className={position === index ? 'agnes__stackBody' : 'agnes__stackBody agnes__stackBody--off'}
+              aria-hidden={position === index ? undefined : 'true'}
+            >
+              {bodyOf(member)}
+            </div>
+          ))}
         </div>
-      )}
+      </article>
       <div className="agnes__stackBar">
-        <span className="agnes__hint agnes__stackHint">{t('stack.hoverHint')}</span>
+        <div
+          className="agnes__stackPills"
+          role="group"
+          aria-label={t('stack.versions', { count: members.length })}
+          /* Cleared when the pointer leaves the GROUP, so travelling from one
+             pill to the next never blanks the preview in between. */
+          onMouseLeave={() => setPreviewId(null)}
+        >
+          {members.map((member, position) => (
+            <button
+              key={member.id}
+              type="button"
+              className={position === index ? 'agnes__stackPill agnes__stackPill--on' : 'agnes__stackPill'}
+              aria-current={position === index ? 'true' : undefined}
+              aria-label={t('stack.version', { index: position + 1 })}
+              title={t('stack.version', { index: position + 1 })}
+              onMouseEnter={() => setPreviewId(member.id)}
+              onClick={() => {
+                // Clicking the newest pill clears the pin instead of pinning the
+                // newest, so "follow new versions" stays reachable after a pin.
+                setPinnedId(position === 0 ? null : member.id)
+                setPreviewId(null)
+              }}
+            >
+              {position + 1}
+            </button>
+          ))}
+        </div>
+        {/* A new version being generated from one of these results is part of the
+            story, so the stack says so. The placeholder card itself stays in the
+            grid: it is a JOB with no record yet, and hiding it would make the
+            panel look idle while work is really running. */}
+        {pendingFrom === undefined ? null : (
+          <span className="agnes__stackPending" role="status">
+            <span className="agnes__spinner" aria-hidden="true" />
+            {t('stack.pending')}
+          </span>
+        )}
         <span className="agnes__spacer" />
         <button
           type="button"
@@ -1527,7 +1724,283 @@ function PendingCard(props: { t: Translate; kind: MediaKind; onCancel: () => voi
   )
 }
 
-/** One gallery card. */
+/**
+ * The facts row data for one record, shared by the card and the stack.
+ *
+ * `retrying` is passed in rather than read here so the caller decides on what the
+ * Host is doing; the stack renders hidden bodies whose retry state must still be
+ * correct when they become visible.
+ */
+function cardFacts(t: Translate, generation: Generation, retrying: boolean): string[] {
+  const asset = generation.asset
+  const took = formatSeconds(generation.durationMs)
+  const dimensions =
+    asset?.width !== undefined && asset?.height !== undefined ? `${String(asset.width)}×${String(asset.height)}` : undefined
+  return [
+    ...(generation.derivedFrom === undefined ? [] : [t('gallery.derivedFrom', { id: generation.derivedFrom.slice(0, 8) })]),
+    dimensions,
+    // A record being retried still describes its failed attempt until the new one
+    // settles, so its old duration is dropped: it would otherwise read as the
+    // runtime of the attempt the user is watching.
+    ...(retrying || took === '' ? [] : [t('gallery.took', { seconds: took })]),
+    ...(generation.attempts !== undefined && generation.attempts > 1
+      ? [t('gallery.attempts', { count: generation.attempts })]
+      : []),
+    ...paramFacts(generation),
+  ].filter((entry): entry is string => entry !== undefined && entry !== '')
+}
+
+/**
+ * Whether a retry is parked between attempts, and until when.
+ *
+ * That state must be told apart from "an attempt is running right now": the only
+ * thing changing while a full queue drains is the clock, and a card that looks
+ * busy for minutes reads as a hang.
+ */
+function retryWaitUntil(retryJob: RunningJob | undefined): number | undefined {
+  if (retryJob?.nextAttemptAt === undefined) return undefined
+  const at = Date.parse(retryJob.nextAttemptAt)
+  return Number.isFinite(at) ? at : undefined
+}
+
+/** The CSS class list one card should carry for its state. */
+function cardClassName(generation: Generation, retrying: boolean, refining: boolean, extra = ''): string {
+  const base = retrying
+    ? 'agnes__card agnes__card--retrying'
+    : generation.status === 'failed'
+      ? `agnes__card agnes__card--failed${refining ? ' agnes__card--refining' : ''}`
+      : `agnes__card${refining ? ' agnes__card--refining' : ''}`
+  return `${base}${extra}`
+}
+
+/** The picture (or player, skeleton, or error frame) at the top of one card. */
+function CardMedia(props: {
+  t: Translate
+  generation: Generation
+  retrying: boolean
+  retryJob: RunningJob | undefined
+  /**
+   * Load the picture immediately instead of lazily.
+   *
+   * A stack keeps every version mounted so the crossfade is instant, and
+   * `loading="lazy"` would defeat that: the images the pointer has not reached
+   * yet are exactly the ones that are still off-screen-ish and therefore still
+   * deferred, so the first flip toward an older version would fade in an empty
+   * frame and then pop. The stack is also bounded to a handful of pictures, so
+   * loading them eagerly costs little.
+   */
+  eager: boolean
+  onOpen: (generation: Generation, opener: Element | null) => void
+}): JSX.Element {
+  const { t, generation, retrying, retryJob, eager, onOpen } = props
+  const asset = generation.asset
+  const isImage = generation.kind === 'image'
+  const waitUntil = retryWaitUntil(retryJob)
+
+  if (retrying) {
+    /* The card the user clicked BECOMES the progress card: same slot, same
+       history row, so restarting a failed task cannot look like a second task
+       appearing next to it. */
+    return (
+      <div className="agnes__thumbFrame">
+        {/* A waiting retry keeps the failed picture's frame but dims the
+            shimmer: nothing is being generated yet, and a moving animation
+            during a multi-minute queue wait is what made the panel feel stuck
+            rather than patient. */}
+        <div className={waitUntil === undefined ? 'agnes__pendingShine' : 'agnes__pendingShine agnes__pendingShine--waiting'} />
+        <span className="agnes__pendingBadge">
+          {waitUntil === undefined ? <span className="agnes__spinner" aria-hidden="true" /> : <IconReset />}
+          {waitUntil === undefined ? (
+            isImage ? t('status.generatingImage') : t('status.generatingVideo')
+          ) : (
+            <RetryCountdown t={t} until={waitUntil} />
+          )}
+        </span>
+      </div>
+    )
+  }
+
+  if (asset !== undefined && isImage) {
+    return (
+      <button
+        type="button"
+        className="agnes__thumbButton"
+        onClick={(event) => onOpen(generation, event.currentTarget)}
+        aria-label={`${t('gallery.viewer')}: ${generation.prompt.slice(0, 80)}`}
+      >
+        <img
+          className="agnes__thumb"
+          src={asset.src}
+          alt={generation.prompt.slice(0, 160)}
+          loading={eager ? 'eager' : 'lazy'}
+          decoding="async"
+        />
+        <span className="agnes__thumbVeil">
+          <span className="agnes__thumbVeilInner">
+            <IconExpand />
+            {t('gallery.viewer')}
+          </span>
+        </span>
+      </button>
+    )
+  }
+
+  if (asset !== undefined) {
+    return (
+      <div className="agnes__thumbFrame">
+        <video className="agnes__thumb agnes__thumb--contain" src={asset.src} controls preload="metadata" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="agnes__thumbFrame">
+      <div className="agnes__thumbEmpty">
+        <IconAlert />
+      </div>
+    </div>
+  )
+}
+
+/** The prompt, facts and action row of one card. */
+function CardBody(props: {
+  t: Translate
+  generation: Generation
+  retrying: boolean
+  retryJob: RunningJob | undefined
+  refining: boolean
+  disabled: boolean
+  onDelete: (id: string) => void
+  onRetry: (generation: Generation) => void
+  onRetryAll: (generation: Generation) => void
+  onCancelJob: () => void
+  onOpen: (generation: Generation, opener: Element | null) => void
+  onEdit: (generation: Generation) => void
+}): JSX.Element {
+  const { t, generation, retrying, retryJob, refining, disabled, onDelete, onRetry, onRetryAll, onCancelJob, onOpen, onEdit } =
+    props
+  const asset = generation.asset
+  const isImage = generation.kind === 'image'
+  const failed = generation.status === 'failed'
+  const waitUntil = retryWaitUntil(retryJob)
+  const attempt = retryJob?.attempt
+  const maxAttempts = retryJob?.maxAttempts
+  const facts = cardFacts(t, generation, retrying)
+
+  return (
+    <div className="agnes__cardBody">
+      <p className="agnes__promptText">{generation.prompt}</p>
+      <div className="agnes__facts">
+        <span className="agnes__fact">{generation.model}</span>
+        {facts.map((fact) => (
+          <span className="agnes__fact" key={fact}>
+            <span className="agnes__factDot" aria-hidden="true" />
+            {fact}
+          </span>
+        ))}
+      </div>
+      {retrying ? (
+        /* One progress surface per task: the stale failure text and its retry
+           button give way to the retry's own state and one cancel action,
+           because this card IS the attempt that is running. */
+        <div className="agnes__cardActions">
+          {attempt !== undefined && maxAttempts !== undefined && maxAttempts > 1 ? (
+            <span className="agnes__attempts">{t('retry.attempt', { index: attempt, total: maxAttempts })}</span>
+          ) : null}
+          <span className="agnes__hint">{waitUntil === undefined ? t('hint.retrying') : t('retry.waitingHint')}</span>
+          <span className="agnes__spacer" />
+          <button type="button" className="agnes__open" onClick={onCancelJob}>
+            {t('action.cancelJob')}
+          </button>
+        </div>
+      ) : (
+        <>
+          {failed ? (
+            <>
+              <p className="agnes__failText">{generation.error ?? t('status.failed')}</p>
+              {generation.retryable === true ? <span className="agnes__retryHint">{t('error.retryable')}</span> : null}
+            </>
+          ) : null}
+          <div className="agnes__cardActions">
+            {/* The viewer replaces the old new-window link for images only: a
+                video already has a player in the card, and the lightbox is an
+                image viewer. */}
+            {asset !== undefined && isImage ? (
+              <button type="button" className="agnes__open" onClick={(event) => onOpen(generation, event.currentTarget)}>
+                <IconExpand />
+                {t('gallery.open')}
+              </button>
+            ) : null}
+            {asset !== undefined ? (
+              <a
+                className="agnes__iconBtn"
+                href={asset.src}
+                download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
+                aria-label={t('gallery.download')}
+                title={t('gallery.download')}
+              >
+                <IconDownload />
+              </a>
+            ) : null}
+            {!failed && isImage && asset !== undefined ? (
+              // A finished picture can seed the next request; a finished video
+              // cannot, because the API offers no way to feed a stored video
+              // back in without a public URL.
+              <button type="button" className="agnes__open" disabled={disabled} onClick={() => onEdit(generation)}>
+                <IconSpark />
+                {t('gallery.continueEditing')}
+              </button>
+            ) : null}
+            {failed ? (
+              // Any failure can be edited and resubmitted, including the ones
+              // an unchanged retry would only reproduce.
+              <button type="button" className="agnes__open" disabled={disabled} onClick={() => onEdit(generation)}>
+                <IconSpark />
+                {t('gallery.editFailed')}
+              </button>
+            ) : null}
+            {failed && generation.retryable === true ? (
+              <>
+                <button type="button" className="agnes__open" disabled={disabled} onClick={() => onRetry(generation)}>
+                  <IconReset />
+                  {t('gallery.retry')}
+                </button>
+                {/* The free queue is full for minutes at a time, so a single
+                    manual retry mostly lands in the same full queue. This one
+                    hands the waiting loop to the Host instead. */}
+                <button
+                  type="button"
+                  className="agnes__open"
+                  disabled={disabled}
+                  title={t('retry.retryAllHint')}
+                  onClick={() => onRetryAll(generation)}
+                >
+                  <IconLoop />
+                  {t('gallery.retryAll')}
+                </button>
+              </>
+            ) : null}
+            <span className="agnes__spacer" />
+            <button
+              type="button"
+              className="agnes__iconBtn agnes__iconBtn--danger"
+              disabled={disabled}
+              aria-label={t('gallery.delete')}
+              title={t('gallery.delete')}
+              onClick={() => {
+                if (confirmInBrowser(t('gallery.confirmDelete'))) onDelete(generation.id)
+              }}
+            >
+              <IconTrash />
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** One gallery card: the ordinary, unstacked rendering of a single record. */
 function GenerationCard(props: {
   t: Translate
   generation: Generation
@@ -1554,203 +2027,24 @@ function GenerationCard(props: {
   onRetryAll: (generation: Generation) => void
   disabled: boolean
 }): JSX.Element {
-  const { t, generation, retrying, retryJob, refining, onDelete, onRetry, onCancelJob, onOpen, onEdit, onRetryAll, disabled } = props
-  const asset = generation.asset
-  const isImage = generation.kind === 'image'
-  const failed = generation.status === 'failed'
-  const took = formatSeconds(generation.durationMs)
-  const dimensions =
-    asset?.width !== undefined && asset?.height !== undefined ? `${String(asset.width)}×${String(asset.height)}` : undefined
-  // A record being retried still describes its failed attempt until the new one
-  // settles, so its old duration is dropped: it would otherwise read as the
-  // runtime of the attempt the user is watching.
-  // A retry may wait between attempts. That state must be told apart from "an
-  // attempt is running right now", because the only thing changing while a full
-  // queue drains is the clock, and a card that looks busy for minutes reads as a
-  // hang.
-  const waitUntil = retryJob?.nextAttemptAt === undefined ? undefined : Date.parse(retryJob.nextAttemptAt)
-  const waiting = waitUntil !== undefined && Number.isFinite(waitUntil)
-  const attempt = retryJob?.attempt
-  const maxAttempts = retryJob?.maxAttempts
-  const facts = [
-    ...(generation.derivedFrom === undefined ? [] : [t('gallery.derivedFrom', { id: generation.derivedFrom.slice(0, 8) })]),
-    dimensions,
-    ...(retrying || took === '' ? [] : [t('gallery.took', { seconds: took })]),
-    ...(generation.attempts !== undefined && generation.attempts > 1
-      ? [t('gallery.attempts', { count: generation.attempts })]
-      : []),
-    ...paramFacts(generation),
-  ].filter((entry): entry is string => entry !== undefined && entry !== '')
-
+  const { t, generation, retrying, retryJob, refining } = props
   return (
-    <article
-      className={
-        retrying
-          ? 'agnes__card agnes__card--retrying'
-          : failed
-            ? `agnes__card agnes__card--failed${refining ? ' agnes__card--refining' : ''}`
-            : `agnes__card${refining ? ' agnes__card--refining' : ''}`
-      }
-    >
-      {retrying ? (
-        /* The card the user clicked BECOMES the progress card: same slot, same
-           history row, so restarting a failed task cannot look like a second
-           task appearing next to it. */
-        <div className="agnes__thumbFrame">
-          {/* A waiting retry keeps the failed picture's frame but dims the
-              shimmer: nothing is being generated yet, and a moving animation
-              during a multi-minute queue wait is what made the panel feel stuck
-              rather than patient. */}
-          <div className={waiting ? 'agnes__pendingShine agnes__pendingShine--waiting' : 'agnes__pendingShine'} />
-          <span className="agnes__pendingBadge">
-            {waiting ? (
-              <IconReset />
-            ) : (
-              <span className="agnes__spinner" aria-hidden="true" />
-            )}
-            {waiting ? <RetryCountdown t={t} until={waitUntil} /> : isImage ? t('status.generatingImage') : t('status.generatingVideo')}
-          </span>
-        </div>
-      ) : asset !== undefined && isImage ? (
-        <button
-          type="button"
-          className="agnes__thumbButton"
-          onClick={(event) => onOpen(generation, event.currentTarget)}
-          aria-label={`${t('gallery.viewer')}: ${generation.prompt.slice(0, 80)}`}
-        >
-          <img className="agnes__thumb" src={asset.src} alt={generation.prompt.slice(0, 160)} loading="lazy" />
-          <span className="agnes__thumbVeil">
-            <span className="agnes__thumbVeilInner">
-              <IconExpand />
-              {t('gallery.viewer')}
-            </span>
-          </span>
-        </button>
-      ) : asset !== undefined ? (
-        <div className="agnes__thumbFrame">
-          <video className="agnes__thumb agnes__thumb--contain" src={asset.src} controls preload="metadata" />
-        </div>
-      ) : (
-        <div className="agnes__thumbFrame">
-          <div className="agnes__thumbEmpty">
-            <IconAlert />
-          </div>
-        </div>
-      )}
-
-      <div className="agnes__cardBody">
-        <p className="agnes__promptText">{generation.prompt}</p>
-        <div className="agnes__facts">
-          <span className="agnes__fact">{generation.model}</span>
-          {facts.map((fact) => (
-            <span className="agnes__fact" key={fact}>
-              <span className="agnes__factDot" aria-hidden="true" />
-              {fact}
-            </span>
-          ))}
-        </div>
-        {retrying ? (
-          /* One progress surface per task: the stale failure text and its retry
-             button give way to the retry's own state and one cancel action,
-             because this card IS the attempt that is running. */
-          <div className="agnes__cardActions">
-            {attempt !== undefined && maxAttempts !== undefined && maxAttempts > 1 ? (
-              <span className="agnes__attempts">{t('retry.attempt', { index: attempt, total: maxAttempts })}</span>
-            ) : null}
-            <span className="agnes__hint">{waiting ? t('retry.waitingHint') : t('hint.retrying')}</span>
-            <span className="agnes__spacer" />
-            <button type="button" className="agnes__open" onClick={onCancelJob}>
-              {t('action.cancelJob')}
-            </button>
-          </div>
-        ) : (
-          <>
-            {failed ? (
-              <>
-                <p className="agnes__failText">{generation.error ?? t('status.failed')}</p>
-                {generation.retryable === true ? <span className="agnes__retryHint">{t('error.retryable')}</span> : null}
-              </>
-            ) : null}
-            <div className="agnes__cardActions">
-              {/* The viewer replaces the old new-window link for images only: a
-                  video already has a player in the card, and the lightbox is an
-                  image viewer. */}
-              {asset !== undefined && isImage ? (
-                <button
-                  type="button"
-                  className="agnes__open"
-                  onClick={(event) => onOpen(generation, event.currentTarget)}
-                >
-                  <IconExpand />
-                  {t('gallery.open')}
-                </button>
-              ) : null}
-              {asset !== undefined ? (
-                <a
-                  className="agnes__iconBtn"
-                  href={asset.src}
-                  download={`agnes-${generation.id}${extensionFor(asset.mediaType)}`}
-                  aria-label={t('gallery.download')}
-                  title={t('gallery.download')}
-                >
-                  <IconDownload />
-                </a>
-              ) : null}
-              {!failed && isImage && asset !== undefined ? (
-                // A finished picture can seed the next request; a finished video
-                // cannot, because the API offers no way to feed a stored video
-                // back in without a public URL.
-                <button type="button" className="agnes__open" disabled={disabled} onClick={() => onEdit(generation)}>
-                  <IconSpark />
-                  {t('gallery.continueEditing')}
-                </button>
-              ) : null}
-              {failed ? (
-                // Any failure can be edited and resubmitted, including the ones
-                // an unchanged retry would only reproduce.
-                <button type="button" className="agnes__open" disabled={disabled} onClick={() => onEdit(generation)}>
-                  <IconSpark />
-                  {t('gallery.editFailed')}
-                </button>
-              ) : null}
-              {failed && generation.retryable === true ? (
-                <>
-                  <button type="button" className="agnes__open" disabled={disabled} onClick={() => onRetry(generation)}>
-                    <IconReset />
-                    {t('gallery.retry')}
-                  </button>
-                  {/* The free queue is full for minutes at a time, so a single
-                      manual retry mostly lands in the same full queue. This one
-                      hands the waiting loop to the Host instead. */}
-                  <button
-                    type="button"
-                    className="agnes__open"
-                    disabled={disabled}
-                    title={t('retry.retryAllHint')}
-                    onClick={() => onRetryAll(generation)}
-                  >
-                    <IconLoop />
-                    {t('gallery.retryAll')}
-                  </button>
-                </>
-              ) : null}
-              <span className="agnes__spacer" />
-              <button
-                type="button"
-                className="agnes__iconBtn agnes__iconBtn--danger"
-                disabled={disabled}
-                aria-label={t('gallery.delete')}
-                title={t('gallery.delete')}
-                onClick={() => {
-                  if (confirmInBrowser(t('gallery.confirmDelete'))) onDelete(generation.id)
-                }}
-              >
-                <IconTrash />
-              </button>
-            </div>
-          </>
-        )}
-      </div>
+    <article className={cardClassName(generation, retrying, refining)}>
+      <CardMedia t={t} generation={generation} retrying={retrying} retryJob={retryJob} eager={false} onOpen={props.onOpen} />
+      <CardBody
+        t={t}
+        generation={generation}
+        retrying={retrying}
+        retryJob={retryJob}
+        refining={refining}
+        disabled={props.disabled}
+        onDelete={props.onDelete}
+        onRetry={props.onRetry}
+        onRetryAll={props.onRetryAll}
+        onCancelJob={props.onCancelJob}
+        onOpen={props.onOpen}
+        onEdit={props.onEdit}
+      />
     </article>
   )
 }

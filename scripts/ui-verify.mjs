@@ -16,7 +16,7 @@
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { appendFailedGeneration, FIXTURE_ID } from './seed-fixture.mjs'
+import { appendFailedGeneration, FIXTURE_ID, seedChain } from './seed-fixture.mjs'
 
 const port = process.env.CDP_PORT || '9333'
 const evidenceDir = process.env.EVIDENCE_DIR || 'docs/evidence'
@@ -1228,15 +1228,18 @@ try {
         if (document.querySelector('.agnes__refine')) return null;
         const stack = document.querySelector('.agnes__stack');
         if (!stack) return null;
-        const front = stack.querySelector('.agnes__stackFront .agnes__card');
+        const front = stack.querySelector('.agnes__card--stacked');
         if (!front) return null;
         return JSON.stringify({
           cards: document.querySelectorAll('.agnes__card').length,
           stacks: document.querySelectorAll('.agnes__stack').length,
-          layers: stack.querySelectorAll('.agnes__stackLayer').length,
+          layers: stack.querySelectorAll('.agnes__stackPeek').length,
+          pills: [...stack.querySelectorAll('.agnes__stackPill')].map((node) => node.textContent.trim()),
           badge: stack.querySelector('.agnes__stackBadge')?.textContent.trim() ?? '',
           facts: [...front.querySelectorAll('.agnes__fact')].map((node) => node.textContent.trim()),
-          hasImage: front.querySelector('img.agnes__thumb') !== null,
+          // The front card holds every version's shot, so "has an image" is only
+          // meaningful for the shot that is actually visible.
+          hasImage: front.querySelector('.agnes__stackShot--on img.agnes__thumb') !== null,
           failed: front.classList.contains('agnes__card--failed'),
         });
       })()`,
@@ -1250,7 +1253,10 @@ try {
       throw new Error(`a continuation must join its source's stack, not add a card: ${String(settleState.cards)} vs ${String(cardsBefore)}`)
     }
     if (settleState.stacks !== 1) throw new Error(`expected exactly one stack, got ${String(settleState.stacks)}`)
-    if (settleState.layers < 1) throw new Error('the stack did not render a peeking layer behind the front card')
+    // One peek per version behind the front, capped at two: a two-version chain
+    // shows exactly one sliver of the version underneath it.
+    if (settleState.layers !== 1) throw new Error(`expected one peeking layer under a two-version stack, got ${String(settleState.layers)}`)
+    if (settleState.pills.length !== 2) throw new Error(`the version rail does not list two versions: ${JSON.stringify(settleState.pills)}`)
     if (!settleState.badge.includes('2')) throw new Error(`the stack badge does not report two versions: ${settleState.badge}`)
     if (!settleState.facts.some((fact) => fact.includes('承接'))) {
       throw new Error(`the newest version does not show its lineage: ${JSON.stringify(settleState.facts)}`)
@@ -1258,59 +1264,210 @@ try {
     await cdp.shot('09-continue-settled.png')
     check('browser-continue-editing-settles', `${String(settleState.cards)} cards, 1 stack of 2 versions, lineage on top`)
 
-    // 21. Hover scrubbing: moving down the stack reaches the older version, and
-    //     leaving it snaps back to the newest. This is a real mouse move over the
-    //     real layout, because a jsdom test cannot prove the bands line up with
-    //     what is painted.
-    // The scrub gesture is scoped to the front card's PICTURE (not the action
-    // row), so the pointer must travel inside that box.
-    const stackBox = await cdp.evaluate(
+    // 21. Scrubbing: moving down the PICTURE reaches the older version, leaving
+    //     the stack restores the newest, and — the point of this rewrite — the
+    //     card does not move or resize while that happens. A jsdom test can
+    //     prove the DOM is stable; only a real browser can prove the painted
+    //     geometry is, which is what "it shook" was about.
+    //
+    //     The measured rect is the card's, taken at every version and compared:
+    //     a remount, a height change or a hover lift would all show up as a
+    //     different box.
+    const boxOf = async () =>
+      JSON.parse(
+        await cdp.evaluate(
+          `(() => {
+            const card = document.querySelector('.agnes__card--stacked');
+            const media = document.querySelector('.agnes__stackMedia');
+            if (!card || !media) return JSON.stringify(null);
+            const c = card.getBoundingClientRect();
+            const m = media.getBoundingClientRect();
+            return JSON.stringify({
+              card: [Math.round(c.left), Math.round(c.top), Math.round(c.width * 100) / 100, Math.round(c.height * 100) / 100],
+              media: [Math.round(m.left), Math.round(m.top), Math.round(m.width * 100) / 100, Math.round(m.height * 100) / 100],
+              badge: document.querySelector('.agnes__stackBadge')?.textContent.trim() ?? '',
+              active: [...document.querySelectorAll('.agnes__stackPill--on')].map((n) => n.textContent.trim()),
+              src: document.querySelector('.agnes__stackShot--on img.agnes__thumb')?.getAttribute('src') ?? null,
+            });
+          })()`,
+        ),
+      )
+    const boxBefore = await boxOf()
+    if (boxBefore === null) throw new Error('the stacked card is not in the DOM')
+    // The scrub surface must announce itself: the hint is displayed by CSS on
+    // hover, and the badge/rail/hint must not sit on top of the clickable
+    // picture in a way that hides the gesture.
+    const affordances = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const hint = document.querySelector('.agnes__stackScrubHint');
+          const media = document.querySelector('.agnes__stackMedia');
+          if (!hint || !media) return JSON.stringify(null);
+          const veil = media.querySelector('.agnes__thumbVeil');
+          return JSON.stringify({
+            hintText: hint.textContent.trim(),
+            hintHidden: getComputedStyle(hint).display === 'none',
+            veilVeiled: veil === null || getComputedStyle(veil).display !== 'none',
+            cursor: getComputedStyle(media.querySelector('.agnes__thumbButton') ?? media).cursor,
+          });
+        })()`,
+      ),
+    )
+    if (affordances === null) throw new Error('the stack is missing its scrub affordances')
+    if (affordances.hintText === '') throw new Error('the scrub hint has no label')
+    // The screenshot veils the picture on hover in a plain card; inside a stack
+    // that veil would cover the sliver region and hide the gesture hint.
+    if (affordances.veilVeiled) throw new Error('the stack picture still renders the hover veil')
+    if (affordances.cursor !== 'ns-resize') throw new Error(`the stack picture does not advertise vertical scrubbing: ${affordances.cursor}`)
+    // The picture area's own box, which is what the pointer scrubs over.
+    const mediaBox = await cdp.evaluate(
       `(() => {
-        const frame = document.querySelector('.agnes__stackFront .agnes__thumbButton');
-        if (!frame) return null;
-        const box = frame.getBoundingClientRect();
-        return JSON.stringify({ x: box.left + box.width / 2, top: box.top, height: box.height });
+        const media = document.querySelector('.agnes__stackMedia');
+        if (!media) return null;
+        const box = media.getBoundingClientRect();
+        return JSON.stringify({ x: box.left + box.width / 2, top: box.top, height: box.height, bottom: box.bottom });
       })()`,
     )
-    const boxState = JSON.parse(stackBox)
-    const topVersionSrc = await cdp.evaluate(
-      `document.querySelector('.agnes__stackFront img.agnes__thumb')?.getAttribute('src') ?? null`,
+    const media = JSON.parse(mediaBox)
+    const topVersionSrc = boxBefore.src
+    if (topVersionSrc === null) throw new Error('the stack has no visible picture')
+
+    // Sweep the pointer down the picture in small steps, recording the geometry
+    // after each one: this is what a real user's hand does, and it is where a
+    // shaking layout is visible.
+    const samples = []
+    for (const ratio of [0, 0.2, 0.4, 0.55, 0.7, 0.85, 0.97]) {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: Math.round(media.x),
+        y: Math.round(media.top + media.height * ratio),
+        button: 'none',
+        buttons: 0,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 170))
+      samples.push(await boxOf())
+    }
+    const distinct = new Set(samples.map((sample) => JSON.stringify(sample.card)))
+    if (distinct.size !== 1) {
+      throw new Error(`the card moved or resized while scrubbing: ${JSON.stringify(samples.map((sample) => sample.card))}`)
+    }
+    const distinctMedia = new Set(samples.map((sample) => JSON.stringify(sample.media)))
+    if (distinctMedia.size !== 1) throw new Error('the picture area moved while scrubbing')
+    // The sweep must actually have reached the older version, or the stability
+    // assertion above proves nothing.
+    const reached = [...new Set(samples.map((sample) => sample.badge))].filter((badge) => badge.includes('2'))
+    if (reached.length === 0) throw new Error(`the sweep never reached the older version: ${JSON.stringify(samples.map((s) => s.badge))}`)
+    await cdp.shot('10-stack-scrub.png')
+
+    // Leaving the stack restores the newest version and changes nothing on disk.
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4, button: 'none', buttons: 0 })
+    await until(
+      cdp.evaluate,
+      `document.querySelector('.agnes__stackShot--on img.agnes__thumb')?.getAttribute('src') === ${JSON.stringify(topVersionSrc)}`,
+      'the stack to snap back to the newest version',
+      5_000,
     )
-    // Bottom band of the stack is the oldest version.
-    await cdp.send('Input.dispatchMouseEvent', {
-      type: 'mouseMoved',
-      x: Math.round(boxState.x),
-      y: Math.round(boxState.top + boxState.height - 6),
-      button: 'none',
-      buttons: 0,
-    })
-    const scrubbed = await until(
+    check('browser-stack-hover-scrub', `swept ${String(samples.length)} bands, card box constant`)
+
+    // 22. The rail commits to a version, and the committed version's own actions
+    //     become the card's actions. This is the "usable, not just pretty" half:
+    //     without it an older version could only be reached by expanding.
+    const pinned = await cdp.evaluate(
+      `(() => {
+        const button = [...document.querySelectorAll('.agnes__stackPill')].at(-1);
+        if (!button) return 'no pill';
+        button.click();
+        return 'clicked';
+      })()`,
+    )
+    if (pinned !== 'clicked') throw new Error(`could not pin a version: ${String(pinned)}`)
+    const pinnedState = await until(
       cdp.evaluate,
       `(() => {
         const stack = document.querySelector('.agnes__stack');
         if (!stack) return null;
-        const src = stack.querySelector('.agnes__stackFront img.agnes__thumb')?.getAttribute('src') ?? null;
-        const badge = stack.querySelector('.agnes__stackBadge')?.textContent.trim() ?? '';
-        if (src === ${JSON.stringify(topVersionSrc)}) return null;
-        return JSON.stringify({ src, badge });
+        const on = stack.querySelector('.agnes__stackShot--on img.agnes__thumb')?.getAttribute('src') ?? null;
+        if (on === ${JSON.stringify(topVersionSrc)}) return null;
+        const box = stack.querySelector('.agnes__card--stacked').getBoundingClientRect();
+        return JSON.stringify({
+          src: on,
+          badge: stack.querySelector('.agnes__stackBadge')?.textContent.trim() ?? '',
+          active: [...stack.querySelectorAll('.agnes__stackPill--on')].map((n) => n.textContent.trim()),
+          card: [Math.round(box.width * 100) / 100, Math.round(box.height * 100) / 100],
+        });
       })()`,
-      'the stack to scrub to the older version',
+      'the rail to commit to the older version',
       5_000,
     )
-    const scrubState = JSON.parse(scrubbed)
-    if (!scrubState.badge.includes('2')) throw new Error(`the badge did not follow the scrub: ${scrubState.badge}`)
-    await cdp.shot('10-stack-scrub.png')
-    // Leaving the stack restores the newest version, and changes nothing on disk.
+    const pinnedParsed = JSON.parse(pinnedState)
+    if (!pinnedParsed.badge.includes('2')) throw new Error(`the badge did not follow the rail: ${pinnedParsed.badge}`)
+    if (pinnedParsed.active.join(',') !== '2') throw new Error(`the rail did not mark the pinned version: ${JSON.stringify(pinnedParsed.active)}`)
+    // The pin survives the pointer leaving: that is what makes the pinned
+    // version's action row usable.
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4, button: 'none', buttons: 0 })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const pinnedSticky = await boxOf()
+    if (pinnedSticky.src !== pinnedParsed.src) throw new Error('the pinned version was lost when the pointer left the stack')
+    if (Math.abs(pinnedSticky.card[3] - boxBefore.card[3]) > 0.5) {
+      throw new Error(`pinning a version changed the card height: ${String(pinnedSticky.card[3])} vs ${String(boxBefore.card[3])}`)
+    }
+    await cdp.shot('11-stack-pinned.png')
+    // Back to following the newest version, so the expanded view is entered from
+    // the state a user would leave behind.
+    await cdp.evaluate(`[...document.querySelectorAll('.agnes__stackPill')].at(0)?.click()`)
     await until(
       cdp.evaluate,
-      `document.querySelector('.agnes__stackFront img.agnes__thumb')?.getAttribute('src') === ${JSON.stringify(topVersionSrc)}`,
-      'the stack to snap back to the newest version',
+      `document.querySelector('.agnes__stackShot--on img.agnes__thumb')?.getAttribute('src') === ${JSON.stringify(topVersionSrc)}`,
+      'the rail to return to the newest version',
       5_000,
     )
-    check('browser-stack-hover-scrub', 'older version on hover, newest restored on leave')
+    check('browser-stack-rail-pin', 'older version pinned, box unchanged, newest restored')
 
-    // 22. Expand: every version becomes its own card, and collapse restores the
+    //     The stack in the other theme: the peek slivers are pictures dimmed by a
+    //     filter over a mixed surface, and the one place that can go wrong is the
+    //     DARK theme, where a near-black sliver on a near-black page reads as no
+    //     stack at all. The earlier theme screenshot is taken before any stack
+    //     exists, so this is the only place the dark stack is ever looked at.
+    const darkStack = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const body = document.body;
+          const wasDark = body.hasAttribute('data-ds-dark-theme');
+          body.setAttribute('data-ds-dark-theme', '');
+          const peek = document.querySelector('.agnes__stackPeek');
+          const card = document.querySelector('.agnes__card--stacked');
+          if (!peek || !card) return JSON.stringify(null);
+          const peekStyle = getComputedStyle(peek);
+          const cardStyle = getComputedStyle(card);
+          return JSON.stringify({
+            image: peekStyle.backgroundImage,
+            border: peekStyle.borderTopColor,
+            cardBg: cardStyle.backgroundColor,
+            pageBg: getComputedStyle(body).backgroundColor,
+            opacity: peekStyle.opacity,
+            wasDark,
+          });
+        })()`,
+      ),
+    )
+    if (darkStack === null) throw new Error('the stack disappeared in the dark theme')
+    // The sliver must be painting a real picture: a list of gray layers here
+    // would mean the peek fell back to its flat colour and lost the "there are
+    // other shots" signal.
+    if (!darkStack.image.includes('url(')) throw new Error(`the dark stack peek has no picture: ${darkStack.image}`)
+    if (Number(darkStack.opacity) <= 0) throw new Error('the dark stack peek is fully transparent')
+    await cdp.shot('13-stack-dark.png')
+    // Restore whatever theme the session was actually in, rather than assuming
+    // one: the remaining checks must run in the state a user would be in.
+    if (darkStack.wasDark) {
+      await cdp.evaluate(`document.body.setAttribute('data-ds-dark-theme', '')`)
+    } else {
+      await cdp.evaluate(`document.body.removeAttribute('data-ds-dark-theme')`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    check('browser-stack-dark-theme', 'peek renders its picture in the dark theme')
+
+    // 23. Expand: every version becomes its own card, and collapse restores the
     //     stack. The card count is the observable difference.
     const expanded = await cdp.evaluate(
       `(() => {
@@ -1327,7 +1484,7 @@ try {
       'every version to render as its own card',
       5_000,
     )
-    await cdp.shot('11-stack-expanded.png')
+    await cdp.shot('12-stack-expanded.png')
     const collapsed = await cdp.evaluate(
       `(() => {
         const button = [...document.querySelectorAll('.agnes__stackExpandedBar button')].find((node) => node.textContent.includes('收起'));
@@ -1354,6 +1511,145 @@ try {
     }
     if (storedRefs[0]?.generationId !== FIXTURE_ID) throw new Error('the stored request lost the symbolic reference')
     check('browser-continue-editing-lineage', 'derivedFrom + symbolic reference kept in the store')
+  }
+
+  // 24. A DEEP chain. Two versions exercise the stack; six exercise the parts
+  //     that only break when there are "too many": the rail must never clip a
+  //     version away, the peek budget must stay capped, and the oldest version
+  //     must remain reachable by scrubbing.
+  //
+  //     Seeding happens HERE and the page is reloaded, because the checks above
+  //     assert exact card counts and a six-record lineage would change them.
+  {
+    const state = JSON.parse(await readFile(join(process.cwd(), '.preview-state.json'), 'utf8'))
+    const chain = await seedChain(state.dataDir, 6)
+    // The reload drops the panel (the sidebar entry has to be selected again),
+    // and a marker left on `window` is the only reliable way to tell the OLD
+    // document from the new one: the previous one stays queryable for a moment.
+    await cdp.evaluate(`window.__agnesBeforeDeep = true`)
+    await cdp.send('Page.reload')
+    await until(
+      cdp.evaluate,
+      `window.__agnesBeforeDeep === undefined && document.querySelector('#root')?.children.length > 0`,
+      'the app to boot after a reload',
+      45_000,
+    )
+    await cdp.evaluate(dismissOverlays).catch(() => {})
+    await openStudio()
+    await until(
+      cdp.evaluate,
+      `document.querySelectorAll('.agnes__stack').length >= 1 && document.querySelector('.agnes__stackPill') !== null`,
+      'the deep lineage to render after a reload',
+      30_000,
+    )
+    const deep = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const stack = [...document.querySelectorAll('.agnes__stack')].find(
+            (node) => node.querySelectorAll('.agnes__stackPill').length > 2);
+          if (!stack) return JSON.stringify(null);
+          const pills = [...stack.querySelectorAll('.agnes__stackPill')];
+          const rail = stack.querySelector('.agnes__stackPills');
+          const railBox = rail.getBoundingClientRect();
+          // Every pill must be INSIDE the rail's box: a clipped pill is a version
+          // the user cannot pick.
+          const clipped = pills.filter((pill) => {
+            const box = pill.getBoundingClientRect();
+            return box.bottom > railBox.bottom + 1 || box.right > railBox.right + 1;
+          }).length;
+          return JSON.stringify({
+            pills: pills.length,
+            peeks: stack.querySelectorAll('.agnes__stackPeek').length,
+            clipped,
+            badge: stack.querySelector('.agnes__stackBadge')?.textContent.trim() ?? '',
+            cards: document.querySelectorAll('.agnes__card').length,
+          });
+        })()`,
+      ),
+    )
+    if (deep === null) throw new Error('the deep lineage did not render a version rail')
+    if (deep.pills !== 6) throw new Error(`expected six versions on the rail, got ${String(deep.pills)}`)
+    if (deep.clipped !== 0) throw new Error(`${String(deep.clipped)} version number(s) are clipped out of the rail`)
+    // The peek budget is two, no matter how deep the chain: the badge states the
+    // real count, so eight slivers would just be noise above the card.
+    if (deep.peeks !== 2) throw new Error(`expected the peek budget to stay at two, got ${String(deep.peeks)}`)
+    if (!deep.badge.includes('6')) throw new Error(`the badge does not report six versions: ${deep.badge}`)
+    await cdp.shot('14-stack-deep.png')
+
+    // The oldest version is reachable by typing on the rail AND by scrubbing.
+    await cdp.evaluate(`[...document.querySelectorAll('.agnes__stackPill')].filter((n) => n.textContent.trim() === '6').at(-1)?.click()`)
+    await until(
+      cdp.evaluate,
+      `(() => {
+        const stack = [...document.querySelectorAll('.agnes__stack')].find(
+          (node) => node.querySelectorAll('.agnes__stackPill').length > 2);
+        return stack?.querySelector('.agnes__stackBadge')?.textContent.includes('6') ?? false;
+      })()`,
+      'the rail to reach the oldest version',
+      5_000,
+    )
+    const deepMedia = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const stack = [...document.querySelectorAll('.agnes__stack')].find(
+            (node) => node.querySelectorAll('.agnes__stackPill').length > 2);
+          const media = stack.querySelector('.agnes__stackMedia');
+          const box = media.getBoundingClientRect();
+          return JSON.stringify({ x: box.left + box.width / 2, top: box.top, height: box.height });
+        })()`,
+      ),
+    )
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: Math.round(deepMedia.x),
+      y: Math.round(deepMedia.top + 2),
+      button: 'none',
+      buttons: 0,
+    })
+    await until(
+      cdp.evaluate,
+      `(() => {
+        const stack = [...document.querySelectorAll('.agnes__stack')].find(
+          (node) => node.querySelectorAll('.agnes__stackPill').length > 2);
+        return stack?.querySelector('.agnes__stackBadge')?.textContent.includes('1 /') ?? false;
+      })()`,
+      'scrubbing back to the top of a deep stack',
+      5_000,
+    )
+    // Measured once more with six versions: the height must still be constant.
+    const deepBefore = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const stack = [...document.querySelectorAll('.agnes__stack')].find(
+            (node) => node.querySelectorAll('.agnes__stackPill').length > 2);
+          const box = stack.querySelector('.agnes__card--stacked').getBoundingClientRect();
+          return JSON.stringify([Math.round(box.width * 100) / 100, Math.round(box.height * 100) / 100]);
+        })()`,
+      ),
+    )
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: Math.round(deepMedia.x),
+      y: Math.round(deepMedia.top + deepMedia.height * 0.62),
+      button: 'none',
+      buttons: 0,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const deepAfter = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const stack = [...document.querySelectorAll('.agnes__stack')].find(
+            (node) => node.querySelectorAll('.agnes__stackPill').length > 2);
+          const box = stack.querySelector('.agnes__card--stacked').getBoundingClientRect();
+          return JSON.stringify([Math.round(box.width * 100) / 100, Math.round(box.height * 100) / 100]);
+        })()`,
+      ),
+    )
+    if (String(deepBefore) !== String(deepAfter)) {
+      throw new Error(`a six-version card changed size while scrubbing: ${JSON.stringify(deepBefore)} -> ${JSON.stringify(deepAfter)}`)
+    }
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4, button: 'none', buttons: 0 })
+    check('browser-stack-deep-chain', `6 versions, ${String(chain.length)} records, rail unclipped, height constant`)
   }
 
   await drainConsole()
