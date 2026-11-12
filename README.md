@@ -173,7 +173,7 @@ rm -rf ~/.dsh/agnes-studio
 
 ## 验证记录
 
-- 离线测试 194 项：参数校验、响应解析、错误映射、存储并发与淘汰、路由栅栏、媒体路径形状、
+- 离线测试 196 项：参数校验、响应解析、错误映射、存储并发与淘汰、路由栅栏、媒体路径形状、
   Range 请求、schema 契约、工具参数映射、看板渲染（含重试就地进入进度态、不新增占位卡；
   完成图回填表单并把来源作为 symbolic 参考图提交；失败记录回填后可调整；视频结果不提供继续编辑）、
   **版本堆叠**（血缘归并成一张卡、单条不加堆叠外壳、鼠标上下移动切换版本并在移出后回最新版、
@@ -209,7 +209,7 @@ rm -rf ~/.dsh/agnes-studio
 
 ```sh
 npm install
-npm run check     # preview + typecheck + 194 项测试 + publint + pack
+npm run check     # preview + typecheck + 196 项测试 + publint + pack
 npm pack
 ```
 

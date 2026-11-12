@@ -602,6 +602,66 @@ describe('version stack', () => {
     expect(document.querySelectorAll('.agnes__grid .agnes__card')).toHaveLength(2)
   })
 
+  it('survives a corrupt lineage that points at itself or in a loop', async () => {
+    // derivedFrom is written by the Host, so a cycle should be impossible — but a
+    // hand-edited or half-restored index must not hang the gallery in an infinite
+    // walk. The guard is a depth bound, and the observable requirement is simply
+    // that every record still renders exactly once.
+    const selfish = version('c0000000-0000-4000-8000-00000000000c', 'self cycle')
+    const loopA0 = version('d0000000-0000-4000-8000-00000000000d', 'loop a')
+    const loopB = version('e0000000-0000-4000-8000-00000000000e', 'loop b', loopA0.id)
+    const state = {
+      generations: [
+        { ...selfish, derivedFrom: selfish.id },
+        { ...loopA0, derivedFrom: loopB.id },
+        loopB,
+      ],
+    }
+    renderPanel(state as never)
+    await screen.findByText('self cycle')
+    expect(screen.getByText('loop a')).toBeTruthy()
+    expect(screen.getByText('loop b')).toBeTruthy()
+    // Each orphaned cycle collapses to a single rendered card; nothing is lost and
+    // nothing is rendered twice.
+    expect(document.querySelectorAll('.agnes__card')).toHaveLength(3)
+  })
+
+  it('drops back to a plain card when a deletion leaves one version', async () => {
+    // Delete/clear can reduce a chain at any moment, including while it is
+    // expanded. The card must not keep stack chrome it can no longer justify, and
+    // it must not crash on the now-stale expansion state.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'v2 prompt', v1.id)
+    const { api } = renderPanel({ generations: [v2, v1] })
+    await screen.findByText('v2 prompt')
+    fireEvent.click(screen.getByRole('button', { name: translate('stack.expand') }))
+    await waitFor(() => expect(document.querySelectorAll('.agnes__card')).toHaveLength(2))
+
+    // Delete the ROOT, which is the harder half: the surviving version still
+    // points at a record that is gone, so the chain must collapse to a plain card
+    // instead of keeping stack chrome or breaking on the stale expansion entry.
+    const afterDelete: StudioState = {
+      configured: true,
+      keySource: 'credential',
+      baseUrl: '',
+      upstreamModels: [],
+      generations: [v2],
+      running: [],
+    }
+    api.remove = async () => afterDelete
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      // Expanded order is newest first, so the root is the last card.
+      const deletes = screen.getAllByRole('button', { name: translate('gallery.delete') })
+      fireEvent.click(deletes[deletes.length - 1] as HTMLElement)
+    } finally {
+      confirm.mockRestore()
+    }
+    await waitFor(() => expect(document.querySelectorAll('.agnes__card')).toHaveLength(1))
+    expect(document.querySelector('.agnes__stack')).toBeNull()
+    expect(screen.queryByRole('button', { name: translate('stack.collapse') })).toBeNull()
+  })
+
   it('treats an orphaned continuation as its own chain', async () => {
     // The source record can be deleted or evicted; the remaining version is still
     // a real result and must not disappear or break the gallery.

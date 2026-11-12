@@ -196,7 +196,7 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 194 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 196 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering
   (including a retry turning its own card into the progress card with no placeholder added; a finished
   image filling the composer and submitting as a symbolic reference; a failed record restored for
