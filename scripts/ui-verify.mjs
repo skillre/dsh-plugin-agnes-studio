@@ -1216,6 +1216,9 @@ try {
     )
     if (submittedEdit !== 'clicked') throw new Error(`could not submit the edit: ${String(submittedEdit)}`)
 
+    // A settled continuation JOINS its source's card as a second version instead
+    // of adding a sibling: the gallery must keep the same number of cards, and
+    // the stack must now report two versions with the new picture on top.
     const settledEdit = await until(
       cdp.evaluate,
       `(() => {
@@ -1223,14 +1226,18 @@ try {
         if (document.querySelector('.agnes__card--retrying')) return null;
         if (document.querySelector('.agnes__busy')) return null;
         if (document.querySelector('.agnes__refine')) return null;
-        const cards = [...document.querySelectorAll('.agnes__card')];
-        if (cards.length !== ${String(cardsBefore + 1)}) return null;
-        const first = cards[0];
+        const stack = document.querySelector('.agnes__stack');
+        if (!stack) return null;
+        const front = stack.querySelector('.agnes__stackFront .agnes__card');
+        if (!front) return null;
         return JSON.stringify({
-          cards: cards.length,
-          facts: [...first.querySelectorAll('.agnes__fact')].map((node) => node.textContent.trim()),
-          hasImage: first.querySelector('img.agnes__thumb') !== null,
-          failed: first.classList.contains('agnes__card--failed'),
+          cards: document.querySelectorAll('.agnes__card').length,
+          stacks: document.querySelectorAll('.agnes__stack').length,
+          layers: stack.querySelectorAll('.agnes__stackLayer').length,
+          badge: stack.querySelector('.agnes__stackBadge')?.textContent.trim() ?? '',
+          facts: [...front.querySelectorAll('.agnes__fact')].map((node) => node.textContent.trim()),
+          hasImage: front.querySelector('img.agnes__thumb') !== null,
+          failed: front.classList.contains('agnes__card--failed'),
         });
       })()`,
       'the edited picture to finish',
@@ -1239,11 +1246,104 @@ try {
     const settleState = JSON.parse(settledEdit)
     if (settleState.failed) throw new Error('the edited generation failed')
     if (!settleState.hasImage) throw new Error('the edited generation has no picture')
+    if (settleState.cards !== cardsBefore) {
+      throw new Error(`a continuation must join its source's stack, not add a card: ${String(settleState.cards)} vs ${String(cardsBefore)}`)
+    }
+    if (settleState.stacks !== 1) throw new Error(`expected exactly one stack, got ${String(settleState.stacks)}`)
+    if (settleState.layers < 1) throw new Error('the stack did not render a peeking layer behind the front card')
+    if (!settleState.badge.includes('2')) throw new Error(`the stack badge does not report two versions: ${settleState.badge}`)
     if (!settleState.facts.some((fact) => fact.includes('承接'))) {
-      throw new Error(`the new card does not show its lineage: ${JSON.stringify(settleState.facts)}`)
+      throw new Error(`the newest version does not show its lineage: ${JSON.stringify(settleState.facts)}`)
     }
     await cdp.shot('09-continue-settled.png')
-    check('browser-continue-editing-settles', `${String(settleState.cards)} cards, lineage on the new card`)
+    check('browser-continue-editing-settles', `${String(settleState.cards)} cards, 1 stack of 2 versions, lineage on top`)
+
+    // 21. Hover scrubbing: moving down the stack reaches the older version, and
+    //     leaving it snaps back to the newest. This is a real mouse move over the
+    //     real layout, because a jsdom test cannot prove the bands line up with
+    //     what is painted.
+    // The scrub gesture is scoped to the front card's PICTURE (not the action
+    // row), so the pointer must travel inside that box.
+    const stackBox = await cdp.evaluate(
+      `(() => {
+        const frame = document.querySelector('.agnes__stackFront .agnes__thumbButton');
+        if (!frame) return null;
+        const box = frame.getBoundingClientRect();
+        return JSON.stringify({ x: box.left + box.width / 2, top: box.top, height: box.height });
+      })()`,
+    )
+    const boxState = JSON.parse(stackBox)
+    const topVersionSrc = await cdp.evaluate(
+      `document.querySelector('.agnes__stackFront img.agnes__thumb')?.getAttribute('src') ?? null`,
+    )
+    // Bottom band of the stack is the oldest version.
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: Math.round(boxState.x),
+      y: Math.round(boxState.top + boxState.height - 6),
+      button: 'none',
+      buttons: 0,
+    })
+    const scrubbed = await until(
+      cdp.evaluate,
+      `(() => {
+        const stack = document.querySelector('.agnes__stack');
+        if (!stack) return null;
+        const src = stack.querySelector('.agnes__stackFront img.agnes__thumb')?.getAttribute('src') ?? null;
+        const badge = stack.querySelector('.agnes__stackBadge')?.textContent.trim() ?? '';
+        if (src === ${JSON.stringify(topVersionSrc)}) return null;
+        return JSON.stringify({ src, badge });
+      })()`,
+      'the stack to scrub to the older version',
+      5_000,
+    )
+    const scrubState = JSON.parse(scrubbed)
+    if (!scrubState.badge.includes('2')) throw new Error(`the badge did not follow the scrub: ${scrubState.badge}`)
+    await cdp.shot('10-stack-scrub.png')
+    // Leaving the stack restores the newest version, and changes nothing on disk.
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4, button: 'none', buttons: 0 })
+    await until(
+      cdp.evaluate,
+      `document.querySelector('.agnes__stackFront img.agnes__thumb')?.getAttribute('src') === ${JSON.stringify(topVersionSrc)}`,
+      'the stack to snap back to the newest version',
+      5_000,
+    )
+    check('browser-stack-hover-scrub', 'older version on hover, newest restored on leave')
+
+    // 22. Expand: every version becomes its own card, and collapse restores the
+    //     stack. The card count is the observable difference.
+    const expanded = await cdp.evaluate(
+      `(() => {
+        const button = [...document.querySelectorAll('.agnes__stackBar button')].find((node) => node.textContent.includes('展开'));
+        if (!button) return 'no expand button';
+        button.click();
+        return 'clicked';
+      })()`,
+    )
+    if (expanded !== 'clicked') throw new Error(`could not expand the stack: ${String(expanded)}`)
+    await until(
+      cdp.evaluate,
+      `document.querySelectorAll('.agnes__card').length === ${String(cardsBefore + 1)}`,
+      'every version to render as its own card',
+      5_000,
+    )
+    await cdp.shot('11-stack-expanded.png')
+    const collapsed = await cdp.evaluate(
+      `(() => {
+        const button = [...document.querySelectorAll('.agnes__stackExpandedBar button')].find((node) => node.textContent.includes('收起'));
+        if (!button) return 'no collapse button';
+        button.click();
+        return 'clicked';
+      })()`,
+    )
+    if (collapsed !== 'clicked') throw new Error(`could not collapse the stack: ${String(collapsed)}`)
+    await until(
+      cdp.evaluate,
+      `document.querySelectorAll('.agnes__card').length === ${String(cardsBefore)} && document.querySelector('.agnes__stack') !== null`,
+      'the stack to come back',
+      5_000,
+    )
+    check('browser-stack-expand-collapse', `${String(cardsBefore + 1)} cards expanded, ${String(cardsBefore)} stacked`)
 
     // The store keeps the SYMBOLIC reference; the data URI is built per attempt.
     const storedIndex = JSON.parse(await readFile(join(continueState.dataDir, 'index.json'), 'utf8'))

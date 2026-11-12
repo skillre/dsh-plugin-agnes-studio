@@ -40,6 +40,19 @@ export interface StudioConfig {
   videoTimeoutMs: number
   /** Poll interval for video tasks in milliseconds. */
   pollIntervalMs: number
+  /**
+   * Total attempts one continuous retry may make, counting the first try.
+   *
+   * The free video queue answers `video_queue_full` for minutes at a time, so a
+   * single manual retry usually lands in the same full queue and the user ends up
+   * clicking retry again and again. Continuous retry moves that waiting loop onto
+   * the Host, where it can outlive the panel. 1 disables it.
+   */
+  retryAttempts: number
+  /** Delay before the second attempt, doubling per attempt. */
+  retryBaseDelayMs: number
+  /** Ceiling for that exponential backoff. */
+  retryMaxDelayMs: number
 }
 
 /** The schema DSH resolves a `skillre-agnes-studio` row's config through. */
@@ -53,6 +66,9 @@ export const Config: Schema<StudioConfig> = Schema.object({
   imageTimeoutMs: Schema.number().min(10_000).max(600_000).step(1000).default(360_000),
   videoTimeoutMs: Schema.number().min(30_000).max(1_800_000).step(1000).default(900_000),
   pollIntervalMs: Schema.number().min(500).max(15_000).step(100).default(2000),
+  retryAttempts: Schema.number().min(1).max(20).step(1).default(5),
+  retryBaseDelayMs: Schema.number().min(1_000).max(300_000).step(1_000).default(15_000),
+  retryMaxDelayMs: Schema.number().min(1_000).max(900_000).step(1_000).default(180_000),
 })
 
 /** Resolve raw row config, keeping the declared defaults authoritative. */

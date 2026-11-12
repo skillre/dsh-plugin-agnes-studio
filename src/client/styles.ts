@@ -1279,6 +1279,139 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   color: rgba(255, 255, 255, 0.72);
 }
 
+/* ---------------------------------------------------------------------------
+   Version stack
+   ---------------------------------------------------------------------------
+   A lineage ("继续编辑" runs on top of each other) is ONE gallery cell whose
+   back versions peek out above the front card. The peeks are pure decoration
+   drawn behind it: they offset upward and inward so the pile reads as depth
+   rather than as a taller card, and they never take the pointer because the
+   scrub gesture needs the whole cell.
+   ------------------------------------------------------------------------- */
+.agnes__stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+/* Reserve the two 8px strips above the front card, so a deep chain never
+   overlaps whatever sits above it in the grid. */
+.agnes__stack--layered { padding-top: 16px; }
+.agnes__stackLayer {
+  position: absolute;
+  height: 80px;
+  border: 1px solid color-mix(in srgb, var(--a-fg) 20%, transparent);
+  border-radius: var(--a-radius);
+  /* Mixed from the foreground rather than a surface token: the gallery sits on
+     the page background, and a white-on-white peek is invisible in the light
+     theme, which is the one place the stack most needs to read as a pile. */
+  background: color-mix(in srgb, var(--a-fg) 7%, var(--a-surface));
+  pointer-events: none;
+}
+/* Two fixed peeks (see STACK_PEEK). The layer nearest the front is wider and
+   lower; the one behind is narrower and higher, so the pile reads as depth.
+   Both are painted behind the opaque front card, which is why only the strips
+   above it are visible — the declaration order is intentionally the reverse of
+   the visual order. */
+.agnes__stackLayer:nth-child(1) {
+  z-index: 2;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+}
+.agnes__stackLayer:nth-child(2) {
+  z-index: 1;
+  top: 0;
+  left: 17px;
+  right: 17px;
+}
+.agnes__stackFront { position: relative; z-index: 3; }
+.agnes__stackFront .agnes__card { box-shadow: var(--a-shadow); }
+
+/* The badge states which version is on top. It sits in the card's own top-left
+   corner so it is unmissable, but it is not a button: scrubbing is the
+   interaction, and a click target here would compete with the thumbnail. */
+.agnes__stackBadge {
+  position: absolute;
+  z-index: 4;
+  top: 7px;
+  left: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(12, 14, 20, 0.62);
+  backdrop-filter: blur(6px);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.agnes__stackBar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px;
+}
+/* The hint is the lowest-value text in the cell, so it gives way first: it
+   truncates, and the whole sentence stays available as the title attribute. The
+   expand label never wraps or truncates — it is a button the user must be able
+   to read. */
+.agnes__stackHint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agnes__stackBar .agnes__open { flex: none; padding: 0 6px; font-size: 10.5px; white-space: nowrap; }
+
+/* The "a new version is being generated" strip under a stack. */
+.agnes__stackPending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+  font-size: 10.5px;
+  font-weight: 550;
+  color: var(--a-accent);
+}
+
+/* The expanded header spans the whole grid row, so it reads as the group's
+   title rather than as a card of its own. */
+.agnes__stackExpandedBar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 2px 0;
+  border-top: 1px dashed var(--a-border);
+  padding-top: 8px;
+}
+.agnes__stackExpandedLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--a-fg-2);
+}
+
+/* Between attempts of a continuous retry nothing is being generated: the
+   shimmer is dimmed to a static tint so the card does not look busy while it
+   waits out a full queue. */
+.agnes__pendingShine--waiting { animation: none; opacity: 0.5; }
+.agnes__attempts {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--a-accent);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .agnes__lightbox { animation: none; }
   .agnes__lightboxImage { transition: none; }

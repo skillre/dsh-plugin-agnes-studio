@@ -96,7 +96,17 @@ function fakeClient(overrides: Partial<AgnesClient> = {}): AgnesClient {
 }
 
 /** Build a runtime over the temp directory with an injected client. */
-async function runtimeWith(client: AgnesClient, options: { key?: string } = {}) {
+async function runtimeWith(
+  client: AgnesClient,
+  options: {
+    key?: string
+    /** Tries per continuous retry, counting the first. */
+    retryAttempts?: number
+    /** Backoff base; 1 keeps the tests off real timers. */
+    retryBaseDelayMs?: number
+    retryMaxDelayMs?: number
+  } = {},
+) {
   const store = await openStore(dataDir, 5)
   return createRuntime({
     store,
@@ -110,6 +120,9 @@ async function runtimeWith(client: AgnesClient, options: { key?: string } = {}) 
     videoTimeoutMs: 1000,
     pollIntervalMs: 1,
     maxMediaBytes: 1024 * 1024,
+    ...(options.retryAttempts === undefined ? {} : { retryAttempts: options.retryAttempts }),
+    ...(options.retryBaseDelayMs === undefined ? {} : { retryBaseDelayMs: options.retryBaseDelayMs }),
+    ...(options.retryMaxDelayMs === undefined ? {} : { retryMaxDelayMs: options.retryMaxDelayMs }),
     clientFactory: () => client,
   })
 }
@@ -634,6 +647,177 @@ describe('continue editing', () => {
     // A retry settles into the SAME record: one row, one lineage.
     expect(retried.id).toBe(stored.id)
     expect(retried.derivedFrom).toBe(source.id)
+  })
+})
+
+describe('continuous retry', () => {
+  /** A client whose video attempts fail N times before succeeding. */
+  function flakyVideo(failures: number): { client: AgnesClient; tries: () => number } {
+    let tries = 0
+    const client = fakeClient({
+      generateVideo: async () => {
+        tries += 1
+        if (tries <= failures) {
+          const { StudioError } = await import('../src/errors.js')
+          throw new StudioError('queue-full', `队列已满（第 ${String(tries)} 次）`, {}, true)
+        }
+        return { bytes: new Uint8Array([0, 0, 0, 0]), mediaType: 'video/mp4', upstreamId: 'video_ok' }
+      },
+    })
+    return { client, tries: () => tries }
+  }
+
+  it('keeps retrying a full queue on the Host until an attempt succeeds', async () => {
+    // The reported problem: the free video queue answers "queue full" for
+    // minutes, so one manual retry lands in the same full queue and the user ends
+    // up clicking again and again. Four failures then a success must end as ONE
+    // succeeded record that says how many tries it took.
+    const { client, tries } = flakyVideo(4)
+    const runtime = await runtimeWith(client, { retryAttempts: 5, retryBaseDelayMs: 1, retryMaxDelayMs: 1 })
+    const failed = await runtime.generate(defaultRequest('video', 'x')).catch((error: unknown) => error)
+    expect(failed).toMatchObject({ code: 'queue-full' })
+    const failedId = (await runtime.state()).generations[0]?.id as string
+
+    const record = await runtime.generate(defaultRequest('video', 'x'), { retryOf: failedId, retryAll: true })
+    expect(record.status).toBe('succeeded')
+    expect(tries()).toBe(5)
+    expect(record.attempts).toBe(4)
+    // The whole loop is still ONE row: a four-attempt wait must not leave four
+    // identical failures in the gallery.
+    const after = await runtime.state()
+    expect(after.generations).toHaveLength(1)
+    expect(after.generations[0]?.id).toBe(failedId)
+    expect(after.running).toEqual([])
+  })
+
+  it('gives up after the attempt budget and records the final failure alone', async () => {
+    const { client, tries } = flakyVideo(99)
+    const runtime = await runtimeWith(client, { retryAttempts: 3, retryBaseDelayMs: 1, retryMaxDelayMs: 1 })
+    const first = await runtime.generate(defaultRequest('video', 'x')).catch((error: unknown) => error)
+    expect(first).toMatchObject({ code: 'queue-full' })
+    const failedId = (await runtime.state()).generations[0]?.id as string
+
+    const second = await runtime
+      .generate(defaultRequest('video', 'x'), { retryOf: failedId, retryAll: true })
+      .catch((error: unknown) => error)
+    expect(second).toMatchObject({ code: 'queue-full' })
+    expect(tries()).toBe(4)
+    const after = await runtime.state()
+    expect(after.generations).toHaveLength(1)
+    expect(after.generations[0]?.status).toBe('failed')
+    // The record counts every try, so a user who comes back later can see it was
+    // not a single unlucky attempt.
+    expect(after.generations[0]?.attempts).toBe(3)
+  })
+
+  it('never retries a failure that cannot succeed on a second identical try', async () => {
+    // A bad parameter, an exhausted quota or a rejected key is deterministic.
+    // Looping on it would burn the budget and delay the honest report.
+    let calls = 0
+    const client = fakeClient({
+      generateImage: async () => {
+        calls += 1
+        const { StudioError } = await import('../src/errors.js')
+        throw new StudioError('invalid-parameter', 'bad size')
+      },
+    })
+    const runtime = await runtimeWith(client, { retryAttempts: 5, retryBaseDelayMs: 1, retryMaxDelayMs: 1 })
+    await runtime.start(defaultRequest('image', 'x'))
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).generations).toHaveLength(1)
+    })
+    expect(calls).toBe(1)
+  })
+
+  it('does not start the loop unless the caller asks for it', async () => {
+    const { client, tries } = flakyVideo(3)
+    const runtime = await runtimeWith(client, { retryAttempts: 5, retryBaseDelayMs: 1, retryMaxDelayMs: 1 })
+    await runtime.generate(defaultRequest('video', 'x')).catch(() => undefined)
+    const failedId = (await runtime.state()).generations[0]?.id as string
+    // A plain retry is still exactly one more try: the loop is opt-in, so a stale
+    // client cannot silently start a minutes-long background waiter.
+    await runtime.generate(defaultRequest('video', 'x'), { retryOf: failedId }).catch(() => undefined)
+    expect(tries()).toBe(2)
+  })
+
+  it('publishes which attempt is running and when the next one starts', async () => {
+    // A retry that waits minutes for a full queue has to look like waiting, not
+    // like working: the card reports the attempt number and a countdown, and it
+    // can only do that from what the Host publishes.
+    let release: (() => void) | undefined
+    let tries = 0
+    const client = fakeClient({
+      generateVideo: async () => {
+        tries += 1
+        // The retry's own first try fails too, so the observable wait belongs to
+        // attempt 2 of 4; the try after that hangs, so the waiting state can be
+        // inspected instead of racing to completion.
+        if (tries <= 2) {
+          const { StudioError } = await import('../src/errors.js')
+          throw new StudioError('queue-full', 'full', {}, true)
+        }
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return { bytes: new Uint8Array([1]), mediaType: 'video/mp4', upstreamId: 'video_ok' }
+      },
+    })
+    const runtime = await runtimeWith(client, { retryAttempts: 4, retryBaseDelayMs: 60_000, retryMaxDelayMs: 60_000 })
+    await runtime.generate(defaultRequest('video', 'x')).catch(() => undefined)
+    const failedId = (await runtime.state()).generations[0]?.id as string
+
+    // The retry is started in the background so the waiting state is observable.
+    void runtime.generate(defaultRequest('video', 'x'), { retryOf: failedId, retryAll: true }).catch(() => undefined)
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).running[0]?.nextAttemptAt).toBeDefined()
+    })
+    const waiting = (await runtime.state()).running[0]
+    if (waiting === undefined) throw new Error('expected a running job')
+    expect(waiting.id).toBe(failedId)
+    expect(waiting.attempt).toBe(2)
+    expect(waiting.maxAttempts).toBe(4)
+    // The deadline is in the future, so the panel can count DOWN to it.
+    expect(Date.parse(waiting.nextAttemptAt as string)).toBeGreaterThan(Date.now())
+
+    // Cancelling during the wait ends the loop and leaves no new record.
+    expect(runtime.cancel(failedId)).toBe(true)
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).running).toEqual([])
+    })
+    expect(release).toBeUndefined()
+    const generations = (await runtime.state()).generations
+    expect(generations).toHaveLength(1)
+    expect(generations[0]?.status).toBe('failed')
+  })
+
+  it('accepts the continuous-retry flag at the wire fence', async () => {
+    // A fence that dropped `retryAll` would silently turn every "持续重试" click
+    // into a single try, which is exactly the behaviour users complained about.
+    const { client, tries } = flakyVideo(1)
+    const runtime = await runtimeWith(client, { retryAttempts: 3, retryBaseDelayMs: 1, retryMaxDelayMs: 1 })
+    await runtime.generate(defaultRequest('video', 'x')).catch(() => undefined)
+    const failedId = (await runtime.state()).generations[0]?.id as string
+
+    const route = createExecuteRoute(runtime)
+    const response = await route.fetch(
+      new Request(`http://127.0.0.1:56873${EXECUTE_PATH}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: 'rpc-1',
+          method: 'agnes-studio',
+          payload: { action: 'retry', id: failedId, retryAll: true },
+        }),
+      }),
+    )
+    const parsed = (await response.json()) as { result: { ok: boolean } }
+    expect(parsed.result.ok).toBe(true)
+    await vi.waitFor(async () => {
+      expect((await runtime.state()).generations[0]?.status).toBe('succeeded')
+    })
+    // One failure, then the retry's own try: the loop did not need a third.
+    expect(tries()).toBe(2)
   })
 })
 

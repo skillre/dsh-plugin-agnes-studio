@@ -19,7 +19,7 @@
  */
 
 import { asStudioError, notConfigured, StudioError } from './errors.js'
-import { createClient, dataUriFor, validateRequest, type AgnesClient, type ClientDeps } from './agnes.js'
+import { createClient, dataUriFor, defaultSleep, validateRequest, type AgnesClient, type ClientDeps } from './agnes.js'
 import { newGenerationId, type StudioStore } from './store.js'
 import {
   defaultModelFor,
@@ -47,6 +47,12 @@ export interface RuntimeDeps {
   readonly videoTimeoutMs: number
   readonly pollIntervalMs: number
   readonly maxMediaBytes: number
+  /** Total tries one continuous retry may make, counting the first. */
+  readonly retryAttempts?: number
+  /** Delay before the second try; doubles per try up to `retryMaxDelayMs`. */
+  readonly retryBaseDelayMs?: number
+  /** Ceiling for that exponential backoff. */
+  readonly retryMaxDelayMs?: number
   readonly fetchImpl?: ClientDeps['fetchImpl']
   readonly sleep?: ClientDeps['sleep']
   readonly now?: () => Date
@@ -106,6 +112,18 @@ export interface GenerateOptions {
    * reusing the id is the whole mechanism.
    */
   readonly retryOf?: string
+  /**
+   * Keep retrying a retryable failure on the Host until the attempts run out.
+   *
+   * The reason this belongs on the Host rather than in the panel: Agnes' free
+   * video queue answers `video_queue_full` for minutes at a time, so one manual
+   * retry usually lands in the SAME full queue and the user ends up clicking
+   * again and again. A Host-owned loop keeps waiting after the panel is closed
+   * or the tab is gone, and reports its progress through `state()`. A failure
+   * that can never succeed on a second try (bad parameter, quota, no key) is
+   * never retried, so this cannot spin on a permanent error.
+   */
+  readonly retryAll?: boolean
 }
 
 /** Normalize the parameters actually sent, for the record's detail view. */
@@ -131,6 +149,9 @@ function paramsOf(request: GenerationRequest): Record<string, string | number | 
 /** Create the runtime over one store and configuration. */
 export function createRuntime(deps: RuntimeDeps): StudioRuntime {
   const now = deps.now ?? (() => new Date())
+  // The retry wait uses the same injectable sleep as the client, so tests drive
+  // backoff without real timers.
+  const sleep = deps.sleep ?? defaultSleep
   const client = (deps.clientFactory ?? createClient)({
     baseUrl: deps.baseUrl,
     resolveKey: async () => (await deps.resolveKey()).key,
@@ -148,8 +169,16 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
    * Keyed by the generation id the job will settle into, so a retry of an
    * existing record occupies that record's slot and the panel can render one
    * placeholder per id without de-duplicating.
+   *
+   * The entry holds a MUTABLE job so continuous retry can publish which attempt
+   * is running and when the next one starts, without re-registering an id the
+   * panel is already tracking.
    */
-  const jobs = new Map<string, { job: RunningJob; controller: AbortController }>()
+  interface JobEntry {
+    job: RunningJob
+    readonly controller: AbortController
+  }
+  const jobs = new Map<string, JobEntry>()
 
   /** Build the state document the dashboard renders. */
   const buildState = async (generations: readonly Generation[], extra: Partial<StudioState> = {}): Promise<StudioState> => {
@@ -188,6 +217,33 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     return controller
   }
 
+  /** The retry-progress fields a running job may be patched with. */
+  interface RetryProgress {
+    readonly attempt?: number
+    readonly maxAttempts?: number
+    readonly nextAttemptAt?: string | undefined
+  }
+
+  /**
+   * Publish a running job's progress.
+   *
+   * Called between attempts so the gallery can show "第 2/5 次尝试 · 稍后自动重试"
+   * and a countdown that comes from the Host's own schedule rather than from a
+   * guess the panel made up.
+   */
+  const updateJob = (id: string, patch: RetryProgress): void => {
+    const entry = jobs.get(id)
+    if (entry === undefined) return
+    const next: { -readonly [K in keyof RunningJob]: RunningJob[K] } = { ...entry.job }
+    if (patch.attempt !== undefined) next.attempt = patch.attempt
+    if (patch.maxAttempts !== undefined) next.maxAttempts = patch.maxAttempts
+    // `exactOptionalPropertyTypes` means "an attempt is running" is an ABSENT
+    // key, so the old countdown must be deleted rather than set to undefined.
+    if (patch.nextAttemptAt === undefined) delete next.nextAttemptAt
+    else next.nextAttemptAt = patch.nextAttemptAt
+    entry.job = next
+  }
+
   /** Drop a settled job from the registry. */
   const unregisterJob = (id: string): void => {
     jobs.delete(id)
@@ -212,6 +268,7 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     createdAt: string
     attemptStartedAt: number
     resolved: GenerationRequest
+    maxAttempts: number
   }> => {
     const key = await deps.resolveKey().catch(() => {
       throw notConfigured()
@@ -235,6 +292,12 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
         ? now().toISOString()
         : ((await deps.store.list()).find((entry) => entry.id === options.retryOf)?.createdAt ?? now().toISOString())
 
+    // A retry that reuses an existing record can go on the continuous loop; a
+    // first attempt keeps its own single try until it has failed, because the
+    // record it will replace does not exist yet.
+    const maxAttempts = retryBudget(options)
+    const derivedFrom = derivedFromOf(request)
+
     const job: RunningJob = {
       id,
       kind: request.kind,
@@ -242,12 +305,45 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
       model: request.model,
       startedAt: now().toISOString(),
       ...(options.retryOf === undefined ? {} : { retryOf: options.retryOf }),
+      ...(derivedFrom === undefined ? {} : { derivedFrom }),
+      ...(maxAttempts > 1 ? { attempt: 1, maxAttempts } : {}),
     }
     const controller = registerJob(job, options.signal)
     // `createdAt` is the record's identity (a retry keeps the original); the
-    // attempt start is separate so `durationMs` measures THIS try, not the whole
-    // history of a record the user has retried several times.
-    return { job, controller, id, createdAt, attemptStartedAt: Date.now(), resolved }
+    // attempt start is separate so `durationMs` measures THIS call, not the whole
+    // history of a record the user has retried several times. Under continuous
+    // retry it therefore measures the loop including its backoff waits, which is
+    // the honest "how long until I got a result" number; `attempts` on the
+    // record says how many tries that covered.
+    return { job, controller, id, createdAt, attemptStartedAt: Date.now(), resolved, maxAttempts }
+  }
+
+  /**
+   * How many tries one call may make, counting this one.
+   *
+   * Continuous retry is opt-in per call (`retryAll`), and the Host never retries
+   * a request it validated itself: those failures are deterministic, so a loop
+   * over them would just burn the budget. A disabled or single-attempt
+   * configuration reports 1, which is exactly the old behaviour.
+   */
+  function retryBudget(options: GenerateOptions): number {
+    if (options.retryAll !== true) return 1
+    const configured = Math.floor(deps.retryAttempts ?? 1)
+    return Number.isFinite(configured) && configured > 1 ? configured : 1
+  }
+
+  /**
+   * Delay before attempt N+1, with exponential backoff and a ceiling.
+   *
+   * The free queue is full in bursts, so retrying after a fixed second mostly
+   * re-hits the same wall; growing the gap gives the queue time to drain while
+   * still capping how long a user waits between visible state changes.
+   */
+  function retryDelayMs(attempt: number): number {
+    const base = Math.max(1, Math.floor(deps.retryBaseDelayMs ?? 1_000))
+    const ceiling = Math.max(base, Math.floor(deps.retryMaxDelayMs ?? base))
+    const grown = base * 2 ** Math.max(0, attempt - 1)
+    return Math.min(ceiling, grown)
   }
 
   /**
@@ -310,6 +406,10 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     readonly createdAt: string
     readonly attemptStartedAt: number
     readonly controller: AbortController
+    /** Continuous-retry budget: total tries, 1 when the retry loop is off. */
+    readonly maxAttempts: number
+    /** Tries already finished, this one included. */
+    readonly attempt: number
     /**
      * Keep a non-retryable failure in the history.
      *
@@ -321,7 +421,24 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     readonly keepAnyFailure: boolean
   }
 
-  /** Run one generation to a settled record and store it. */
+  /** One network try. Throws the failure as-is; records nothing. */
+  const attemptOnce = async (resolved: GenerationRequest, controller: AbortController): Promise<{ bytes: Uint8Array; mediaType: string; upstreamId?: string }> => {
+    return resolved.kind === 'image'
+      ? client.generateImage(resolved, { signal: controller.signal })
+      : client.generateVideo(resolved, { signal: controller.signal })
+  }
+
+  /**
+   * Run one generation to a settled record and store it.
+   *
+   * The retry loop lives here, not in the panel, because the free video queue
+   * stays full for minutes: one manual retry almost always lands in the same
+   * full queue, so the user ends up clicking again and again. A Host-owned loop
+   * keeps waiting while the panel is closed, and each intermediate try is
+   * reported through `state()` instead of being written to the index — a
+   * five-attempt queue wait must not leave five identical failure rows behind.
+   * Only the FINAL outcome becomes a record, carrying how many tries it took.
+   */
   const runGeneration = async (attempt: Attempt): Promise<Generation> => {
     const { request, resolved, id, createdAt, attemptStartedAt: started, controller, keepAnyFailure } = attempt
     const derivedFrom = derivedFromOf(request)
@@ -337,45 +454,68 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
       request,
       ...(derivedFrom === undefined ? {} : { derivedFrom }),
     }
+
+    let attemptNo = attempt.attempt
     let outcome: { bytes: Uint8Array; mediaType: string; upstreamId?: string }
-    try {
-      outcome =
-        resolved.kind === 'image'
-          ? await client.generateImage(resolved, { signal: controller.signal })
-          : await client.generateVideo(resolved, { signal: controller.signal })
-    } catch (error) {
-      // The job's OWN controller aborting means the user (or the plugin shutting
-      // down) cancelled this work, whatever error shape the client surfaced. That
-      // must never be recorded as a failure, and must never race a teardown that
-      // has already removed the store: report a cancellation and touch nothing.
-      if (controller.signal.aborted) {
-        throw new StudioError('cancelled', '请求已取消。')
+    for (;;) {
+      try {
+        outcome = await attemptOnce(resolved, controller)
+        break
+      } catch (error) {
+        // The job's OWN controller aborting means the user (or the plugin
+        // shutting down) cancelled this work, whatever error shape the client
+        // surfaced. That must never be recorded as a failure, and must never
+        // race a teardown that has already removed the store.
+        if (controller.signal.aborted) throw new StudioError('cancelled', '请求已取消。')
+        const failure = asStudioError(error)
+        // Only a failure that could plausibly succeed later earns another try:
+        // a bad parameter, an exhausted quota or a rejected key is deterministic,
+        // so looping on it would burn the budget and delay the honest report.
+        const canRetry = failure.retryable === true && attemptNo < attempt.maxAttempts
+        if (!canRetry) {
+          const settledAt = now()
+          const failed: Generation = {
+            ...base,
+            status: 'failed',
+            finishedAt: settledAt.toISOString(),
+            durationMs: settledAt.getTime() - started,
+            errorCode: failure.code,
+            error: failure.message,
+            ...(failure.retryable ? { retryable: true } : {}),
+            ...(attemptNo > 1 ? { attempts: attemptNo } : {}),
+          }
+          // A BACKGROUND failure must always become a record: the panel has no
+          // request left to report it on, so a record is its only way to learn
+          // the job ended badly. The TOOL path throws to the caller instead, so
+          // a plain validation refusal there stays out of the history rather
+          // than becoming gallery noise — as does a retry, which replaces a row
+          // the user can already see and therefore may never silently disappear.
+          // A cancellation the user asked for is not a failure to remember.
+          if (
+            failure.code !== 'cancelled' &&
+            (keepAnyFailure || failure.retryable === true || failure.code === 'timeout')
+          ) {
+            await deps.store.append(failed, new Uint8Array(0), 'application/octet-stream').catch(() => undefined)
+            throw new StudioError(failure.code, failure.message, { ...failure.details, recordId: id }, failure.retryable)
+          }
+          throw failure
+        }
+        // Publish the wait so the card can count down to the next try instead of
+        // looking frozen for minutes.
+        const delay = retryDelayMs(attemptNo)
+        updateJob(id, {
+          attempt: attemptNo + 1,
+          maxAttempts: attempt.maxAttempts,
+          nextAttemptAt: new Date(now().getTime() + delay).toISOString(),
+        })
+        await sleep(delay, controller.signal)
+        // The wait was cancelled: a user who stops a queued retry gets no card.
+        if (controller.signal.aborted) throw new StudioError('cancelled', '请求已取消。')
+        attemptNo += 1
+        updateJob(id, { attempt: attemptNo, maxAttempts: attempt.maxAttempts, nextAttemptAt: undefined })
       }
-      const failure = asStudioError(error)
-      const settledAt = now()
-      const failed: Generation = {
-        ...base,
-        status: 'failed',
-        finishedAt: settledAt.toISOString(),
-        durationMs: settledAt.getTime() - started,
-        errorCode: failure.code,
-        error: failure.message,
-        ...(failure.retryable ? { retryable: true } : {}),
-      }
-      // A BACKGROUND failure must always become a record: the panel has no
-      // request left to report it on, so a record is its only way to learn the
-      // job ended badly. The TOOL path throws to the caller instead, so a plain
-      // validation refusal there stays out of the history rather than becoming
-      // gallery noise — as does a retry, which replaces a row the user can
-      // already see and therefore may never silently disappear.
-      // A cancellation the user asked for is not a failure to remember: leaving a
-      // red "已取消" card behind would be noise the user caused on purpose.
-      if (failure.code !== 'cancelled' && (keepAnyFailure || failure.retryable === true || failure.code === 'timeout')) {
-        await deps.store.append(failed, new Uint8Array(0), 'application/octet-stream').catch(() => undefined)
-        throw new StudioError(failure.code, failure.message, { ...failure.details, recordId: id }, failure.retryable)
-      }
-      throw failure
     }
+
     const settledAt = now()
     const record: Generation = {
       ...base,
@@ -383,6 +523,7 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
       finishedAt: settledAt.toISOString(),
       durationMs: settledAt.getTime() - started,
       ...(outcome.upstreamId === undefined ? {} : { upstreamId: outcome.upstreamId }),
+      ...(attemptNo > 1 ? { attempts: attemptNo } : {}),
     }
     return deps.store.append(record, outcome.bytes, outcome.mediaType)
   }
@@ -405,7 +546,7 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
     async generate(request, options = {}) {
       // The tool path: register the job so the panel shows it, then await the
       // outcome and let the throw reach the caller.
-      const { id, createdAt, attemptStartedAt, controller, resolved } = await begin(request, options)
+      const { id, createdAt, attemptStartedAt, controller, resolved, maxAttempts } = await begin(request, options)
       try {
         // A tool call reports through its throw; only a retry replaces an
         // existing row and so must persist whatever the new outcome is.
@@ -416,6 +557,8 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
           createdAt,
           attemptStartedAt,
           controller,
+          maxAttempts,
+          attempt: 1,
           keepAnyFailure: options.retryOf !== undefined,
         })
       } finally {
@@ -432,9 +575,19 @@ export function createRuntime(deps: RuntimeDeps): StudioRuntime {
      * failure — which is what makes leaving the studio and coming back safe.
      */
     async start(request, options = {}) {
-      const { job, id, createdAt, attemptStartedAt, controller, resolved } = await begin(request, options)
+      const { job, id, createdAt, attemptStartedAt, controller, resolved, maxAttempts } = await begin(request, options)
       // A background job's record IS its report, so every failure is kept.
-      void runGeneration({ request, resolved, id, createdAt, attemptStartedAt, controller, keepAnyFailure: true })
+      void runGeneration({
+        request,
+        resolved,
+        id,
+        createdAt,
+        attemptStartedAt,
+        controller,
+        maxAttempts,
+        attempt: 1,
+        keepAnyFailure: true,
+      })
         .catch(() => undefined)
         .finally(() => unregisterJob(id))
       return job

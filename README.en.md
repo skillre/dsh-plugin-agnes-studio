@@ -29,15 +29,22 @@ validates against the same table before sending. Pick `agnes-video-2.5-flash` an
 collapses to 720P, because that model accepts nothing else upstream — so the UI can never offer a
 value the API would reject with HTTP 400.
 
-**A result can be continued.** A finished image card offers "Continue editing": its prompt, model,
-resolution, aspect ratio and reference images come back into the composer, and the picture itself is
-submitted as the next request's **reference image** (image-to-image) — say what should change and what
-must stay in the prompt. A failed card offers "Edit & retry": no retyping, the parameters return to the
-form for adjustment. Both actions create a **new record** and keep the original one; the new card is
-marked "From <record id>" so the history shows the before → after pair. Finished videos are excluded:
-upstream has no endpoint that edits or extends an existing video, and its "reference video" input needs
-a publicly reachable URL and only the paid `agnes-video-2.5` accepts it, so a finished video card
-offers download and delete only. A failed video can still be edited and retried.
+**A result can be continued, and the versions stack in one card.** A finished image card offers
+"Continue editing": its prompt, model, resolution, aspect ratio and reference images come back into the
+composer, and the picture itself is submitted as the next request's **reference image**
+(image-to-image) — say what should change and what must stay in the prompt. A failed card offers
+"Edit & retry": no retyping, the parameters return to the form for adjustment.
+
+A new version does **not** open another card: it joins the original as another layer of the same card.
+The badge reads "Version 2 of 3", the newest version sits on top, and the older ones peek out above it.
+**Move the pointer up and down over that thumbnail** to flip through versions — a preview only, nothing
+is written, and leaving the card returns to the newest. "Expand all versions" splits the lineage into
+ordinary cards, each with its own view, download and edit actions; "Collapse" stacks them again. What
+used to look like a row of unrelated cards now reads as one result that got better.
+
+Finished videos are excluded: upstream has no endpoint that edits or extends an existing video, and its
+"reference video" input needs a publicly reachable URL and only the paid `agnes-video-2.5` accepts it,
+so a finished video card offers download and delete only. A failed video can still be edited and retried.
 
 ## Install
 
@@ -76,6 +83,9 @@ All keys are optional and override the row's `config`:
 | `imageTimeoutMs` | `360000` | Image timeout (upstream recommends 60–360 s) |
 | `videoTimeoutMs` | `900000` | Whole video task timeout, including queue wait |
 | `pollIntervalMs` | `2000` | Video poll interval |
+| `retryAttempts` | `5` | Total tries for "Keep retrying", counting the first; `1` disables the loop |
+| `retryBaseDelayMs` | `15000` | Delay before the second try; doubles per try |
+| `retryMaxDelayMs` | `180000` | Ceiling for that backoff |
 
 `dataDir` follows `$DSH_HOME` on purpose: a hard-coded `~/.dsh` would escape an isolated profile and
 write into the user's real installation.
@@ -123,6 +133,17 @@ the command above if you no longer want the files.
   one more failure per attempt. The progress is shown **inside that card itself** (spinner, "retrying;
   this record updates when it finishes", cancel) — no second "new task" card appears beside it waiting
   to merge, and the work is not repeated in the background banner.
+- **Continuous retry: no endless clicking while the queue is full.** The free video queue answers
+  "queue full" for minutes at a time, so a single manual retry usually hits the same wall. A retryable
+  failed card therefore also offers "Keep retrying": the Host re-queues on its own backoff
+  (15s → 30s → 60s → 120s → 180s, capped) for up to 5 attempts, and the card shows "Attempt 2 of 5"
+  plus an "Auto-retrying in Ns" countdown. That wait lives on the **Host**, so closing the panel or
+  reloading the page does not interrupt it. Only failures that can plausibly heal are retried (full
+  queue, rate limit, 5xx, timeout, broken download); a bad parameter, an exhausted balance or a
+  rejected key is reported after one try instead of burning the budget. The wait is cancellable, the
+  final outcome writes exactly **one** record, and that record reports "N attempts". Tune it with
+  `retryAttempts` / `retryBaseDelayMs` / `retryMaxDelayMs`; `retryAttempts: 1` turns the loop off and
+  restores single-shot retry.
 - **Continue editing and edit & retry.** "Continue editing" on a finished image fills the composer
   with that record's original request (prompt, model, resolution, ratio, references) and shows the
   source picture above the form. On submit the Host reads the stored bytes and inlines them as a
@@ -175,19 +196,24 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 177 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 194 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering
   (including a retry turning its own card into the progress card with no placeholder added; a finished
   image filling the composer and submitting as a symbolic reference; a failed record restored for
-  adjustment; a finished video offering no continuation), image-viewer interaction, the background-job
-  lifecycle (state reporting a running job, a background failure landing as a record, cancel leaving no
-  record, dispose aborting every job, prompt optimization), and the SHIPPED client bundle (loaded and
-  rendered through the real loader envelope).
+  adjustment; a finished video offering no continuation), the **version stack** (lineage collapsing
+  into one card, a single record growing no stack chrome, scrubbing down the picture switching versions
+  and snapping back on leave, expanding into standalone cards and collapsing again, an orphaned
+  continuation surviving its deleted source), **continuous retry** (only self-healing failures are
+  retried, the budget ending in ONE record that reports its attempt count, single-shot behaviour without
+  the flag, the wait publishing its next attempt time, and the wire fence accepting `retryAll`),
+  image-viewer interaction, the background-job lifecycle (state reporting a running job, a background
+  failure landing as a record, cancel leaving no record, dispose aborting every job, prompt
+  optimization), and the SHIPPED client bundle (loaded and rendered through the real loader envelope).
 - Packed tarball installed into a disposable isolated profile: `--dump-config` composition, bounded
   real startup, authenticated `/api` calls, a real image generation downloaded through the media
   route, records and files surviving a restart, and the file disappearing after deletion.
-- Real headless Chrome driving the DSH Web app — 36 checks (the two retry and three continue-editing
-  checks need a real API key; without one they are skipped and reported as such): sidebar entry, panel render, the
+- Real headless Chrome driving the DSH Web app — 38 checks (the two retry, three continue-editing and
+  two version-stack checks need a real API key; without one they are skipped and reported as such): sidebar entry, panel render, the
   two-pane layout (measured: both panes side by side, the composer not spanning the panel), the
   model-derived controls **and their shape** (four resolutions are a segmented control, eight ratios
   are chips), Flash narrowing the resolution list, the generate button reachable without scrolling,
@@ -202,7 +228,11 @@ the command above if you no longer want the files.
   (the prompt restored, the source thumbnail shown, the card count unchanged, the submit button
   reading "Generate edit"; submitting really runs a `data:` URI image-to-image generation, adds one
   card, marks the new card with its lineage, and the store keeps the symbolic reference and
-  `derivedFrom`). Evidence is in `docs/evidence/`.
+  `derivedFrom`), and the **version stack** (a continuation settling into its source's stack rather than
+  adding a sibling — card count unchanged, one stack, at least one peeking layer, a badge reporting two
+  versions and lineage on the top card; a real mouse move to the bottom of the thumbnail scrubbing to the
+  older version with the badge following, and leaving restoring the newest; Expand turning it into two
+  standalone cards and Collapse restoring the stack). Evidence is in `docs/evidence/`.
 - Real-key end-to-end runs (not in CI): submit an image, leave the panel, come back while it is still
   rendering and see it running, then watch it settle into a result card; the same running job is still
   shown as running after a **full page reload**, then settles into a result card; submit a video that

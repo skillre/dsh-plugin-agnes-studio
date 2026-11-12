@@ -39,8 +39,16 @@ export interface ClientApi {
   state(options?: { signal?: AbortSignal; probeModels?: boolean }): Promise<StudioState>
   /** Start a generation in the background; resolves with the refreshed state. */
   start(request: GenerationRequest, retryOf?: string): Promise<StudioState>
-  /** Restart a stored failed record from ITS OWN stored request. */
-  retry(id: string): Promise<StudioState>
+  /**
+   * Restart a stored failed record from ITS OWN stored request.
+   *
+   * `retryAll` asks the Host to keep retrying a retryable failure on its own
+   * schedule instead of making the user click again: the free video queue answers
+   * "queue full" for minutes, so one manual retry usually lands in the same full
+   * queue. The loop runs on the Host, which is why leaving the panel does not
+   * stop it.
+   */
+  retry(id: string, options?: { retryAll?: boolean }): Promise<StudioState>
   /** Cancel one running job. */
   cancel(id: string): Promise<StudioState>
   /** Rewrite a prompt with the text model. */
@@ -89,8 +97,10 @@ export function createApi(connection: ClientConnectionLike, lifetime: AbortSigna
         (await call({ action: 'start', request, ...(retryOf === undefined ? {} : { retryOf }) })).state,
       )
     },
-    async retry(id) {
-      return normalizeState((await call({ action: 'retry', id })).state)
+    async retry(id, options) {
+      return normalizeState(
+        (await call({ action: 'retry', id, ...(options?.retryAll === true ? { retryAll: true } : {}) })).state,
+      )
     },
     async cancel(id) {
       return normalizeState((await call({ action: 'cancel', id })).state)

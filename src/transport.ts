@@ -91,7 +91,11 @@ const videoRequestSchema = z
 const requestSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('state'), probeModels: z.boolean().optional() }).strict(),
   z.object({ action: z.literal('start'), request: z.union([imageRequestSchema, videoRequestSchema]), retryOf: z.string().min(1).max(128).optional() }).strict(),
-  z.object({ action: z.literal('retry'), id: z.string().min(1).max(128) }).strict(),
+  // `retryAll` turns on the Host-owned continuous retry loop for this attempt.
+  // It is per-call rather than configuration-only so the panel can offer both
+  // "retry once" and "keep retrying", and so a stale client keeps the old
+  // single-shot behaviour instead of silently starting a long loop.
+  z.object({ action: z.literal('retry'), id: z.string().min(1).max(128), retryAll: z.boolean().optional() }).strict(),
   z.object({ action: z.literal('cancel'), id: z.string().min(1).max(128) }).strict(),
   z.object({ action: z.literal('optimize'), prompt: z.string().min(1).max(4000), kind: z.enum(['image', 'video']) }).strict(),
   z.object({ action: z.literal('delete'), id: z.string().min(1).max(128) }).strict(),
@@ -142,7 +146,10 @@ async function dispatch(runtime: StudioRuntime, request: StudioRequest, signal: 
       if (record.request === undefined) {
         throw new StudioError('bad-request', '这条记录来自更早的版本，没有保存原始请求参数，请重新填写后再生成。')
       }
-      await runtime.start(record.request, { retryOf: record.id })
+      await runtime.start(record.request, {
+        retryOf: record.id,
+        ...(request.retryAll === true ? { retryAll: true } : {}),
+      })
       return { state: await runtime.state() }
     }
     case 'cancel': {

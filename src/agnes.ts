@@ -105,7 +105,7 @@ export interface ClientDeps {
 }
 
 /** Default sleep that honours cancellation. */
-function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted === true) {
       reject(new StudioError('cancelled', '请求已取消。'))

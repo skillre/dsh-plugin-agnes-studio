@@ -125,6 +125,9 @@ export function apply(ctx: Context, rawConfig: Partial<StudioConfig> = {}): void
     videoTimeoutMs: config.videoTimeoutMs,
     pollIntervalMs: config.pollIntervalMs,
     maxMediaBytes: LIMITS.maxMediaBytes,
+    retryAttempts: config.retryAttempts,
+    retryBaseDelayMs: config.retryBaseDelayMs,
+    retryMaxDelayMs: config.retryMaxDelayMs,
   })
 
   // A missing key is a configuration state the panel explains, not a mount

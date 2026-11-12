@@ -51,6 +51,7 @@ import {
   type MediaKind,
   type MediaReference,
   type ModelSpec,
+  type RunningJob,
   type StudioState,
   type VideoMode,
   type VideoRatio,
@@ -382,6 +383,32 @@ const IconArrowLeft = (): JSX.Element => (
 const IconArrowRight = (): JSX.Element => (
   <Glyph size={17}>
     <path d="M9.5 5.5 16 12l-6.5 6.5" />
+  </Glyph>
+)
+
+const IconLoop = (): JSX.Element => (
+  <Glyph>
+    <path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.6" />
+    <path d="M20 4.6v4h-4" />
+    <path d="M20 12a8 8 0 0 1-13.7 5.6L4 15.4" />
+    <path d="M4 19.4v-4h4" />
+  </Glyph>
+)
+
+const IconCollapse = (): JSX.Element => (
+  <Glyph>
+    <path d="M9 4v5H4" />
+    <path d="M15 20v-5h5" />
+    <path d="M20 9h-5V4" />
+    <path d="M4 15h5v5" />
+  </Glyph>
+)
+
+const IconLayers = (): JSX.Element => (
+  <Glyph>
+    <path d="M12 3.4 3.2 8.1l8.8 4.7 8.8-4.7-8.8-4.7Z" />
+    <path d="M3.2 12.6 12 17.3l8.8-4.7" />
+    <path d="M3.2 16.9 12 21.6l8.8-4.7" />
   </Glyph>
 )
 
@@ -1186,6 +1213,282 @@ function ImageViewer(props: {
 }
 
 // ---------------------------------------------------------------------------
+// Version chains
+// ---------------------------------------------------------------------------
+
+/** One lineage: every record that chains back to the same original result. */
+interface VersionChain {
+  /** The newest member, which is what the stack shows on top. */
+  readonly head: Generation
+  /**
+   * The chain's identity: the id of its root ancestor.
+   *
+   * Expansion is keyed by this rather than by the head. The head changes every
+   * time a new version settles, and losing the expanded state at exactly that
+   * moment would make the panel snap shut under the user's pointer.
+   */
+  readonly rootId: string
+  /**
+   * Every member, newest first.
+   *
+   * A version's index in the gallery is its ACTUAL creation order, not its
+   * position in this array: a chain can lose a member (deleted, evicted) without
+   * the remaining versions renumbering themselves.
+   */
+  readonly members: readonly Generation[]
+}
+
+/** How deep a lineage is followed before it is treated as a root. */
+const CHAIN_MAX_DEPTH = 64
+
+/**
+ * Group records into lineages, preserving the gallery's newest-first order.
+ *
+ * "继续编辑" is meant to read as one result that got better, not as unrelated
+ * cards: the panel therefore renders one card per lineage instead of one per
+ * record. The position is the newest member's, so a chain climbs the gallery as
+ * the user keeps editing it.
+ *
+ * A `derivedFrom` pointing at a record that no longer exists (deleted, or evicted
+ * by the history cap) makes that record a root rather than an orphan: the chain
+ * must survive losing its origin, because the remaining versions are still real
+ * results the user can act on.
+ */
+export function chainsOf(generations: readonly Generation[]): VersionChain[] {
+  const byId = new Map<string, Generation>()
+  for (const generation of generations) byId.set(generation.id, generation)
+
+  /** Walk to the root of one record, bounding the depth against a cycle. */
+  const rootOf = (generation: Generation): string => {
+    let current = generation
+    for (let depth = 0; depth < CHAIN_MAX_DEPTH; depth += 1) {
+      const parentId = current.derivedFrom
+      if (parentId === undefined) return current.id
+      const parent = byId.get(parentId)
+      // A missing parent is a broken link, not a reason to hide the record.
+      if (parent === undefined || parent.id === current.id) return current.id
+      current = parent
+    }
+    return current.id
+  }
+
+  const members = new Map<string, Generation[]>()
+  const order: string[] = []
+  for (const generation of generations) {
+    const root = rootOf(generation)
+    const bucket = members.get(root)
+    if (bucket === undefined) {
+      members.set(root, [generation])
+      order.push(root)
+    } else {
+      bucket.push(generation)
+    }
+  }
+  return order.map((root) => {
+    const bucket = members.get(root) ?? []
+    // `generations` is already newest-first, so each bucket is too. The ROOT is
+    // the oldest surviving version, not necessarily the record the chain began
+    // with: an evicted origin is gone, and the oldest remaining version is what
+    // identifies the lineage from then on.
+    const head = bucket[0] ?? (generations[0] as Generation)
+    return { head, rootId: root, members: bucket }
+  })
+}
+
+/**
+ * How many versions behind the front are drawn as peeking layers.
+ *
+ * Two is enough to read as "a pile" without pushing the front card out of the
+ * gallery rhythm; the badge states the real count.
+ */
+const STACK_PEEK = 2
+
+/**
+ * One lineage rendered as a stack of versions.
+ *
+ * Interaction contract, chosen to make a chain discoverable without a menu:
+ * - hovering the stack and moving vertically SCRUBS the visible version (a
+ *   preview; nothing is committed), then it snaps back to the newest on leave;
+ * - the expand button swaps the stack for the individual cards, which is the
+ *   only way to reach a specific version's own actions;
+ * - a single-version chain renders as a plain card, so ordinary results do not
+ *   grow stack chrome they can never use.
+ */
+function VersionStack(props: {
+  t: Translate
+  chain: VersionChain
+  retryingIds: ReadonlySet<string>
+  retryJobs: ReadonlyMap<string, RunningJob>
+  refiningId: string | undefined
+  disabled: boolean
+  onDelete: (id: string) => void
+  onRetry: (generation: Generation) => void
+  onRetryAll: (generation: Generation) => void
+  onCancelJob: (generation: Generation) => void
+  onOpen: (generation: Generation, opener: Element | null) => void
+  onEdit: (generation: Generation) => void
+  onExpand: (rootId: string, expanded: boolean) => void
+  expanded: boolean
+  /** The record a new version is currently being generated FROM, if any. */
+  pendingFrom: string | undefined
+}): JSX.Element {
+  const { t, chain, expanded, onExpand, pendingFrom, ...rest } = props
+  const { members, head } = chain
+  // Index 0 is the newest version; the badge counts from 1 for humans.
+  const [shown, setShown] = useState(0)
+
+  // The stack can shrink under the pointer (a version deleted, evicted, or a new
+  // one arriving which pushes everything down one slot), so the preview index has
+  // to be clamped instead of trusted.
+  const index = Math.min(shown, Math.max(0, members.length - 1))
+  const current = members[index] ?? head
+
+  useEffect(() => {
+    if (shown > members.length - 1) setShown(0)
+  }, [members.length, shown])
+
+  const cardFor = (generation: Generation): JSX.Element => (
+    <GenerationCard
+      key={generation.id}
+      t={t}
+      generation={generation}
+      retrying={rest.retryingIds.has(generation.id)}
+      {...(rest.retryJobs.get(generation.id) === undefined ? {} : { retryJob: rest.retryJobs.get(generation.id) as RunningJob })}
+      refining={rest.refiningId === generation.id}
+      disabled={rest.disabled}
+      onDelete={rest.onDelete}
+      onRetry={rest.onRetry}
+      onRetryAll={rest.onRetryAll}
+      onCancelJob={() => rest.onCancelJob(generation)}
+      onOpen={rest.onOpen}
+      onEdit={rest.onEdit}
+    />
+  )
+
+  if (members.length === 1) return cardFor(head)
+
+  /*
+   * Expanded: the lineage becomes a header strip plus one ordinary card per
+   * version. The strip is laid out as a full-width grid row (the gallery is a
+   * grid, and a fragment's children are its items), so the versions still read as
+   * one group while each keeps its own actions.
+   */
+  if (expanded) {
+    return (
+      <>
+        <div className="agnes__stackExpandedBar" key={`${head.id}-bar`}>
+          <span className="agnes__stackExpandedLabel">
+            <IconLayers />
+            {t('stack.versions', { count: members.length })}
+          </span>
+          <span className="agnes__spacer" />
+          <button type="button" className="agnes__open" onClick={() => onExpand(chain.rootId, false)}>
+            <IconCollapse />
+            {t('stack.collapse')}
+          </button>
+        </div>
+        {members.map((member) => cardFor(member))}
+      </>
+    )
+  }
+
+  /**
+   * Map a pointer position inside the front card's PICTURE to a version index.
+   *
+   * Vertical bands over the picture, newest at the top: the topmost band is the
+   * version already on top, so the gesture starts where the eye already is and
+   * moving down reaches further back in time. One band per version (rather than
+   * a fixed pixel step) keeps the gesture identical for 2 or 8 versions.
+   *
+   * Deliberately scoped to the thumbnail: scrubbing from the action row would
+   * swap the card's identity out from under a pointer that is about to click one
+   * of its buttons.
+   */
+  const onMove = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    if (members.length < 2) return
+    const target = event.target as Element | null
+    const frame = target?.closest?.('.agnes__thumbFrame, .agnes__thumbButton') ?? null
+    if (frame === null) return
+    const box = frame.getBoundingClientRect()
+    if (box.height <= 0) return
+    const ratio = Math.min(0.999, Math.max(0, (event.clientY - box.top) / box.height))
+    const next = Math.min(members.length - 1, Math.floor(ratio * members.length))
+    if (next !== index) setShown(next)
+  }
+
+  const peeks = Math.min(STACK_PEEK, members.length - 1)
+  return (
+    <div
+      className={`agnes__stack${peeks > 0 ? ' agnes__stack--layered' : ''}`}
+      onMouseMove={onMove}
+      onMouseLeave={() => setShown(0)}
+    >
+      {/* The peeking layers are decoration only: they must not steal the
+          pointer, or scrubbing would stop working exactly where the stack looks
+          three deep. */}
+      {Array.from({ length: peeks }, (_unused, layer) => (
+        <span className="agnes__stackLayer" key={layer} aria-hidden="true" />
+      ))}
+      <div className="agnes__stackFront">
+        <div className="agnes__stackBadge">
+          <IconLayers />
+          {t('stack.badge', { index: index + 1, total: members.length })}
+        </div>
+        {cardFor(current)}
+      </div>
+      {/* A new version being generated from one of these results is part of the
+          story, so the stack says so. The placeholder card itself stays in the
+          grid: it is a JOB with no record yet, and hiding it would make the panel
+          look idle while work is really running. */}
+      {pendingFrom === undefined ? null : (
+        <div className="agnes__stackPending" role="status">
+          <span className="agnes__spinner" aria-hidden="true" />
+          {t('stack.pending')}
+        </div>
+      )}
+      <div className="agnes__stackBar">
+        <span className="agnes__hint agnes__stackHint">{t('stack.hoverHint')}</span>
+        <span className="agnes__spacer" />
+        <button
+          type="button"
+          className="agnes__open"
+          aria-label={t('stack.expand')}
+          title={t('stack.expand')}
+          onClick={() => onExpand(chain.rootId, true)}
+        >
+          <IconExpand />
+          {t('stack.expand')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Continuous retry
+// ---------------------------------------------------------------------------
+
+/**
+ * The seconds-remaining counter shown while a retry waits for its next attempt.
+ *
+ * It ticks on its own because nothing else changes during the wait: the Host is
+ * asleep between tries, and a static "retrying" label for minutes is exactly what
+ * looks like a hang. The deadline comes from the Host's `nextAttemptAt`, so this
+ * never invents a schedule the Host is not following.
+ */
+function RetryCountdown(props: { t: Translate; until: number }): JSX.Element {
+  const { t, until } = props
+  const seconds = (target: number): number => Math.max(0, Math.ceil((target - Date.now()) / 1000))
+  const [remaining, setRemaining] = useState(() => seconds(until))
+  useEffect(() => {
+    setRemaining(seconds(until))
+    const timer = setInterval(() => setRemaining(seconds(until)), 1000)
+    return () => clearInterval(timer)
+  }, [until])
+  return <span>{t('retry.waiting', { seconds: remaining })}</span>
+}
+
+// ---------------------------------------------------------------------------
 // Gallery
 // ---------------------------------------------------------------------------
 
@@ -1230,6 +1533,15 @@ function GenerationCard(props: {
   generation: Generation
   /** Whether the Host is retrying THIS record right now. */
   retrying: boolean
+  /**
+   * The running job replacing this record, when there is one.
+   *
+   * Needed for continuous retry, which reports its own attempt number and the
+   * time of the next try: without it the card can only say "retrying" for
+   * minutes with nothing changing, which is the exact experience that made users
+   * click retry again and again.
+   */
+  retryJob?: RunningJob
   /** Whether the composer is currently editing from THIS record. */
   refining: boolean
   onDelete: (id: string) => void
@@ -1238,9 +1550,11 @@ function GenerationCard(props: {
   onOpen: (generation: Generation, opener: Element | null) => void
   /** Load this record back into the composer (continue editing / edit & retry). */
   onEdit: (generation: Generation) => void
+  /** Start the Host-owned continuous retry loop for this record. */
+  onRetryAll: (generation: Generation) => void
   disabled: boolean
 }): JSX.Element {
-  const { t, generation, retrying, refining, onDelete, onRetry, onCancelJob, onOpen, onEdit, disabled } = props
+  const { t, generation, retrying, retryJob, refining, onDelete, onRetry, onCancelJob, onOpen, onEdit, onRetryAll, disabled } = props
   const asset = generation.asset
   const isImage = generation.kind === 'image'
   const failed = generation.status === 'failed'
@@ -1250,10 +1564,21 @@ function GenerationCard(props: {
   // A record being retried still describes its failed attempt until the new one
   // settles, so its old duration is dropped: it would otherwise read as the
   // runtime of the attempt the user is watching.
+  // A retry may wait between attempts. That state must be told apart from "an
+  // attempt is running right now", because the only thing changing while a full
+  // queue drains is the clock, and a card that looks busy for minutes reads as a
+  // hang.
+  const waitUntil = retryJob?.nextAttemptAt === undefined ? undefined : Date.parse(retryJob.nextAttemptAt)
+  const waiting = waitUntil !== undefined && Number.isFinite(waitUntil)
+  const attempt = retryJob?.attempt
+  const maxAttempts = retryJob?.maxAttempts
   const facts = [
     ...(generation.derivedFrom === undefined ? [] : [t('gallery.derivedFrom', { id: generation.derivedFrom.slice(0, 8) })]),
     dimensions,
     ...(retrying || took === '' ? [] : [t('gallery.took', { seconds: took })]),
+    ...(generation.attempts !== undefined && generation.attempts > 1
+      ? [t('gallery.attempts', { count: generation.attempts })]
+      : []),
     ...paramFacts(generation),
   ].filter((entry): entry is string => entry !== undefined && entry !== '')
 
@@ -1272,10 +1597,18 @@ function GenerationCard(props: {
            history row, so restarting a failed task cannot look like a second
            task appearing next to it. */
         <div className="agnes__thumbFrame">
-          <div className="agnes__pendingShine" />
+          {/* A waiting retry keeps the failed picture's frame but dims the
+              shimmer: nothing is being generated yet, and a moving animation
+              during a multi-minute queue wait is what made the panel feel stuck
+              rather than patient. */}
+          <div className={waiting ? 'agnes__pendingShine agnes__pendingShine--waiting' : 'agnes__pendingShine'} />
           <span className="agnes__pendingBadge">
-            <span className="agnes__spinner" aria-hidden="true" />
-            {isImage ? t('status.generatingImage') : t('status.generatingVideo')}
+            {waiting ? (
+              <IconReset />
+            ) : (
+              <span className="agnes__spinner" aria-hidden="true" />
+            )}
+            {waiting ? <RetryCountdown t={t} until={waitUntil} /> : isImage ? t('status.generatingImage') : t('status.generatingVideo')}
           </span>
         </div>
       ) : asset !== undefined && isImage ? (
@@ -1321,7 +1654,10 @@ function GenerationCard(props: {
              button give way to the retry's own state and one cancel action,
              because this card IS the attempt that is running. */
           <div className="agnes__cardActions">
-            <span className="agnes__hint">{t('hint.retrying')}</span>
+            {attempt !== undefined && maxAttempts !== undefined && maxAttempts > 1 ? (
+              <span className="agnes__attempts">{t('retry.attempt', { index: attempt, total: maxAttempts })}</span>
+            ) : null}
+            <span className="agnes__hint">{waiting ? t('retry.waitingHint') : t('hint.retrying')}</span>
             <span className="agnes__spacer" />
             <button type="button" className="agnes__open" onClick={onCancelJob}>
               {t('action.cancelJob')}
@@ -1378,10 +1714,25 @@ function GenerationCard(props: {
                 </button>
               ) : null}
               {failed && generation.retryable === true ? (
-                <button type="button" className="agnes__open" disabled={disabled} onClick={() => onRetry(generation)}>
-                  <IconReset />
-                  {t('gallery.retry')}
-                </button>
+                <>
+                  <button type="button" className="agnes__open" disabled={disabled} onClick={() => onRetry(generation)}>
+                    <IconReset />
+                    {t('gallery.retry')}
+                  </button>
+                  {/* The free queue is full for minutes at a time, so a single
+                      manual retry mostly lands in the same full queue. This one
+                      hands the waiting loop to the Host instead. */}
+                  <button
+                    type="button"
+                    className="agnes__open"
+                    disabled={disabled}
+                    title={t('retry.retryAllHint')}
+                    onClick={() => onRetryAll(generation)}
+                  >
+                    <IconLoop />
+                    {t('gallery.retryAll')}
+                  </button>
+                </>
               ) : null}
               <span className="agnes__spacer" />
               <button
@@ -1427,6 +1778,15 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
    * generation produced no artifact to seed anything with.
    */
   const [refineSource, setRefineSource] = useState<Generation | null>(null)
+  /**
+   * Which lineages the user expanded, keyed by the chain HEAD's record id.
+   *
+   * Keyed by head rather than by root: a chain's head changes every time a new
+   * version settles, and the expansion is about the CARD the user was looking
+   * at. Holding it in page state (not per card) is what keeps an expanded chain
+   * expanded across the Host polls that rewrite every record object.
+   */
+  const [expandedChains, setExpandedChains] = useState<ReadonlySet<string>>(() => new Set<string>())
   /** The finished picture the current edit is based on, when the source has one. */
   const refineSeed =
     refineSource !== null && refineSource.kind === 'image' && refineSource.asset !== undefined ? refineSource : undefined
@@ -1543,6 +1903,31 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
       setError(null)
       try {
         const next = await api.retry(generation.id)
+        if (!mounted.current) return
+        setState(next)
+      } catch (cause) {
+        if (!mounted.current) return
+        setError({ message: messageFor(t, cause), retryable: false })
+      } finally {
+        if (mounted.current) setSubmitting(false)
+      }
+    },
+    [api, t],
+  )
+
+  /**
+   * Retry one stored failure with the Host's continuous loop.
+   *
+   * The difference from a plain retry is only the flag: the Host keeps waiting
+   * out a full queue on its own schedule, so the user does not have to keep
+   * clicking (and does not have to stay on the panel either).
+   */
+  const retryRecordAll = useCallback(
+    async (generation: Generation) => {
+      setSubmitting(true)
+      setError(null)
+      try {
+        const next = await api.retry(generation.id, { retryAll: true })
         if (!mounted.current) return
         setState(next)
       } catch (cause) {
@@ -1688,6 +2073,14 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
     () => (filter === 'all' ? generations : generations.filter((generation) => generation.kind === filter)),
     [filter, generations],
   )
+  /**
+   * The gallery as lineages, filtered by capability.
+   *
+   * Built from the FILTERED list so a chain cannot straddle the filter tabs: an
+   * image chain and a video chain never share a root, since a continuation of a
+   * video result is impossible (the API has no way to feed a stored video back).
+   */
+  const chains = useMemo(() => chainsOf(filtered), [filtered])
   const imageCount = generations.filter((generation) => generation.kind === 'image').length
   const videoCount = generations.length - imageCount
   // A running job blocks a second submit: the upstream video queue is shared and
@@ -1706,11 +2099,28 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
    * replace, i.e. a fresh generation, still gets a placeholder of its own.
    */
   const retryingRecordIds = new Set<string>()
+  const retryJobs = new Map<string, RunningJob>()
   for (const job of running) {
-    if (job.retryOf !== undefined) retryingRecordIds.add(job.retryOf)
+    if (job.retryOf !== undefined) {
+      retryingRecordIds.add(job.retryOf)
+      // The retry's own progress (which attempt, when the next one starts) is
+      // what turns a silent wait into something the card can report.
+      retryJobs.set(job.retryOf, job)
+    }
   }
   /** Jobs that are not a retry, i.e. work with no card of its own yet. */
   const pendingJobs = running.filter((job) => job.retryOf === undefined)
+  /**
+   * Chain heads that a new version is being generated from right now.
+   *
+   * The job reports `derivedFrom` (the record it continues), which is the same
+   * link the settled record will carry. Matching on the head is enough: an edit
+   * always continues the version the user was looking at.
+   */
+  const pendingSources: string[] = []
+  for (const job of pendingJobs) {
+    if (job.derivedFrom !== undefined) pendingSources.push(job.derivedFrom)
+  }
   const placeholders = pendingJobs.filter((job) => filter === 'all' || job.kind === filter)
 
   /** The image records the viewer can step through, in gallery order. */
@@ -2202,22 +2612,34 @@ export function StudioPage({ api, t }: StudioPageProps): JSX.Element {
               {placeholders.map((job) => (
                 <PendingCard key={job.id} t={t} kind={job.kind} onCancel={() => void cancelJob(job.id)} />
               ))}
-              {filtered.map((generation) => (
-                <GenerationCard
-                  key={generation.id}
+              {chains.map((chain) => (
+                <VersionStack
+                  key={chain.rootId}
                   t={t}
-                  generation={generation}
-                  retrying={retryingRecordIds.has(generation.id)}
-                  refining={refineSource?.id === generation.id}
+                  chain={chain}
+                  expanded={expandedChains.has(chain.rootId)}
+                  retryingIds={retryingRecordIds}
+                  retryJobs={retryJobs}
+                  refiningId={refineSource?.id}
                   disabled={disabled}
                   onDelete={(id) => void deleteOne(id)}
                   onRetry={(generation) => void retryRecord(generation)}
+                  onRetryAll={(generation) => void retryRecordAll(generation)}
                   onEdit={beginRefine}
-                  onCancelJob={() => {
+                  pendingFrom={pendingSources.filter((id) => chain.members.some((member) => member.id === id)).at(0)}
+                  onExpand={(rootId, next) => {
+                    setExpandedChains((current) => {
+                      const updated = new Set(current)
+                      if (next) updated.add(rootId)
+                      else updated.delete(rootId)
+                      return updated
+                    })
+                  }}
+                  onCancelJob={(generation) => {
                     // Cancel the JOB, looked up by the record it replaces: the
                     // panel is not the authority on job ids, `retryOf` is the
                     // link between a record and the attempt running for it.
-                    const job = running.find((entry) => entry.retryOf === generation.id)
+                    const job = retryJobs.get(generation.id)
                     if (job !== undefined) void cancelJob(job.id)
                   }}
                   onOpen={openViewer}

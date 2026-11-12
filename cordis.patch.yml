@@ -31,3 +31,11 @@
         videoTimeoutMs: 900000
         # Poll interval while a video task runs.
         pollIntervalMs: 2000
+        # Continuous retry: total tries per retry, counting the first. The free
+        # video queue stays full for minutes, so one manual retry usually lands in
+        # the same full queue. 1 disables the loop.
+        retryAttempts: 5
+        # Delay before the second try, doubling per try.
+        retryBaseDelayMs: 15000
+        # Ceiling for that backoff.
+        retryMaxDelayMs: 180000

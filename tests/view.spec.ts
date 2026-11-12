@@ -33,6 +33,7 @@ function fakeApi(state: Partial<StudioState> = {}): {
   api: ClientApi
   generated: unknown[]
   retried: string[]
+  retryAll: boolean[]
   optimized: { prompt: string; kind: MediaKind }[]
 } {
   const full: StudioState = {
@@ -47,6 +48,8 @@ function fakeApi(state: Partial<StudioState> = {}): {
   const generated: unknown[] = []
   /** The record id each retry targeted. */
   const retried: string[] = []
+  /** Whether each retry asked the Host for the continuous loop. */
+  const retryAll: boolean[] = []
   const optimized: { prompt: string; kind: MediaKind }[] = []
   const api: ClientApi = {
     state: async () => full,
@@ -61,8 +64,9 @@ function fakeApi(state: Partial<StudioState> = {}): {
         ],
       }
     },
-    retry: async (id) => {
+    retry: async (id, options) => {
       retried.push(id)
+      retryAll.push(options?.retryAll === true)
       const target = full.generations.find((generation) => generation.id === id)
       return { ...full, running: [{ id, kind: target?.kind ?? 'image', prompt: target?.prompt ?? '', model: target?.model ?? '', startedAt: new Date().toISOString(), retryOf: id }] }
     },
@@ -74,12 +78,12 @@ function fakeApi(state: Partial<StudioState> = {}): {
     remove: async () => full,
     clear: async () => full,
   }
-  return { api, generated, retried, optimized }
+  return { api, generated, retried, retryAll, optimized }
 }
 
 /** Render the panel with a fake API. */
 function renderPanel(state: Partial<StudioState> = {}) {
-  const { api, generated, retried, optimized } = fakeApi(state)
+  const { api, generated, retried, retryAll, optimized } = fakeApi(state)
   const view = render(
     createElement(StudioPage, {
       api,
@@ -87,7 +91,7 @@ function renderPanel(state: Partial<StudioState> = {}) {
       t: translate,
     }),
   )
-  return { ...view, api, generated, retried, optimized }
+  return { ...view, api, generated, retried, retryAll, optimized }
 }
 
 describe('sidebar glyph', () => {
@@ -459,6 +463,267 @@ describe('studio panel', () => {
  * A DOM-presence assertion passes on that build; only clicking and inspecting the
  * resulting overlay catches it. So every test here drives the interaction.
  */
+describe('version stack', () => {
+  /** One stored picture; `from` makes it a continuation of another record. */
+  function version(id: string, prompt: string, from?: string): Generation {
+    return {
+      id,
+      kind: 'image',
+      status: 'succeeded',
+      model: 'agnes-image-2.5-flash',
+      prompt,
+      params: { size: '1K', ratio: '1:1' },
+      createdAt: '2026-11-11T00:00:00.000Z',
+      asset: { src: `/api/agnes-studio/media?id=${id}`, mediaType: 'image/png', bytes: 900 },
+      ...(from === undefined ? {} : { derivedFrom: from }),
+      ...(from === undefined
+        ? {}
+        : {
+            request: {
+              kind: 'image' as const,
+              prompt,
+              model: 'agnes-image-2.5-flash',
+              size: '1K' as const,
+              ratio: '1:1' as const,
+              references: [{ kind: 'image' as const, generationId: from }],
+            },
+          }),
+    }
+  }
+
+  /** The ids whose thumbnails are rendered inside a stack's front card. */
+  function frontSources(): string[] {
+    const front = document.querySelector('.agnes__stackFront')
+    if (front === null) return []
+    return [...front.querySelectorAll('img.agnes__thumb')].map((img) => img.getAttribute('src') ?? '')
+  }
+
+  it('renders a chain of continuations as ONE card, newest on top', async () => {
+    // The complaint this fixes: a chain of edits looked like three unrelated
+    // results, so the user could not tell which one was the latest or that they
+    // belonged together. The gallery lists newest first, so v3 is index 0.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'a red apple')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'a redder apple', v1.id)
+    const v3 = version('v3000000-0000-4000-8000-000000000003', 'a scarlet apple', v2.id)
+    renderPanel({ generations: [v3, v2, v1] })
+
+    await screen.findByText('a scarlet apple')
+    expect(document.querySelectorAll('.agnes__card')).toHaveLength(1)
+    expect(document.querySelector('.agnes__stack')).not.toBeNull()
+    // Newest version is the visible face of the stack.
+    expect(frontSources()).toEqual([v3.asset?.src])
+    // The badge tells the user there is more than one version, and which one they
+    // are looking at.
+    expect(screen.getByText(translate('stack.badge', { index: 1, total: 3 }))).toBeTruthy()
+  })
+
+  it('leaves a single record exactly as it was', async () => {
+    // Stack chrome on an ordinary result would be dead weight: one version can
+    // never be scrubbed or expanded.
+    const only = version('v1000000-0000-4000-8000-000000000001', 'a lonely apple')
+    renderPanel({ generations: [only] })
+    await screen.findByText('a lonely apple')
+    expect(document.querySelector('.agnes__stack')).toBeNull()
+    expect(document.querySelectorAll('.agnes__stackLayer')).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: translate('stack.expand') })).toBeNull()
+    // Its ordinary actions are untouched.
+    expect(screen.getByRole('button', { name: translate('gallery.continueEditing') })).toBeTruthy()
+  })
+
+  it('switches versions as the pointer moves over the stack and restores on leave', async () => {
+    // Hover scrubbing is the whole point: comparing versions must not need a
+    // click, and it must never commit anything.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'v2 prompt', v1.id)
+    renderPanel({ generations: [v2, v1] })
+    await screen.findByText('v2 prompt')
+    expect(frontSources()).toEqual([v2.asset?.src])
+
+    const stack = document.querySelector('.agnes__stack') as HTMLElement
+    const frame = stack.querySelector('.agnes__thumbButton') as HTMLElement
+    // jsdom reports a zero-height box, so the band maths needs a real height.
+    Object.defineProperty(frame, 'getBoundingClientRect', {
+      value: () => ({ top: 0, left: 0, right: 200, bottom: 200, width: 200, height: 200, x: 0, y: 0, toJSON: () => ({}) }),
+    })
+    // The gesture is scoped to the picture, not the action row: a card must not
+    // swap identity under a pointer that is about to click one of its buttons.
+    // The lower half of the picture is the second-newest version.
+    fireEvent.mouseMove(frame, { clientY: 150, clientX: 100 })
+    await waitFor(() => expect(frontSources()).toEqual([v1.asset?.src]))
+    expect(screen.getByText(translate('stack.badge', { index: 2, total: 2 }))).toBeTruthy()
+
+    // Leaving the stack snaps back to the newest version without changing data.
+    fireEvent.mouseLeave(stack)
+    await waitFor(() => expect(frontSources()).toEqual([v2.asset?.src]))
+  })
+
+  it('expands every version into its own card and collapses back', async () => {
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'v2 prompt', v1.id)
+    const v3 = version('v3000000-0000-4000-8000-000000000003', 'v3 prompt', v2.id)
+    renderPanel({ generations: [v3, v2, v1] })
+    await screen.findByText('v3 prompt')
+    expect(document.querySelectorAll('.agnes__card')).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('button', { name: translate('stack.expand') }))
+    await waitFor(() => expect(document.querySelectorAll('.agnes__card')).toHaveLength(3))
+    // Newest first, and each version keeps its own actions.
+    expect(screen.getByText('v1 prompt')).toBeTruthy()
+    expect(screen.getByText('v2 prompt')).toBeTruthy()
+    expect(screen.getByText('v3 prompt')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: translate('gallery.continueEditing') })).toHaveLength(3)
+
+    fireEvent.click(screen.getByRole('button', { name: translate('stack.collapse') }))
+    await waitFor(() => expect(document.querySelectorAll('.agnes__card')).toHaveLength(1))
+    expect(document.querySelector('.agnes__stack')).not.toBeNull()
+  })
+
+  it('keeps the chain in its NEWEST version\'s gallery position', async () => {
+    // The gallery is newest-first, so a chain must sit where its latest version
+    // belongs: ordering it by the oldest version would push a freshly edited
+    // result down the page, which is the opposite of what the user just did.
+    const older = version('a0000000-0000-4000-8000-00000000000a', 'an unrelated apple')
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'v2 prompt', v1.id)
+    // Newest first: the chain's head (v2) precedes the unrelated record.
+    renderPanel({ generations: [v2, v1, older] })
+
+    await screen.findByText('v2 prompt')
+    // The stack element IS the grid cell, so it has to be matched on itself
+    // rather than searched for among its descendants.
+    const cells = [...document.querySelectorAll('.agnes__grid > *')]
+    const stackIndex = cells.findIndex((cell) => cell.classList.contains('agnes__stack'))
+    const unrelatedIndex = cells.findIndex((cell) => (cell.textContent ?? '').includes('an unrelated apple'))
+    expect(stackIndex).toBe(0)
+    expect(unrelatedIndex).toBe(1)
+    // And the newest version is the one on the face of the stack.
+    expect(frontSources()).toEqual([v2.asset?.src])
+    // The older chain members are NOT rendered as separate top-level cells.
+    expect(document.querySelectorAll('.agnes__grid .agnes__card')).toHaveLength(2)
+  })
+
+  it('treats an orphaned continuation as its own chain', async () => {
+    // The source record can be deleted or evicted; the remaining version is still
+    // a real result and must not disappear or break the gallery.
+    const orphan = version('v9000000-0000-4000-8000-000000000009', 'a stranded apple', 'gone0000-0000-4000-8000-000000000000')
+    renderPanel({ generations: [orphan] })
+    await screen.findByText('a stranded apple')
+    expect(document.querySelectorAll('.agnes__card')).toHaveLength(1)
+    expect(document.querySelector('.agnes__stack')).toBeNull()
+  })
+})
+
+describe('continuous retry', () => {
+  /** A retryable failed video, as the Host stores it. */
+  function failedVideo(): Generation {
+    return {
+      id: 'cccc3333-3333-4333-8333-333333333333',
+      kind: 'video',
+      status: 'failed',
+      model: 'agnes-video-2.5-flash',
+      prompt: 'a queue test',
+      params: {},
+      createdAt: '2026-11-11T00:00:00.000Z',
+      errorCode: 'queue-full',
+      error: '队列已满',
+      retryable: true,
+      request: { kind: 'video', prompt: 'a queue test', model: 'agnes-video-2.5-flash', mode: 'text', size: '720P', ratio: '16:9', seconds: 5, references: [] },
+    }
+  }
+
+  it('asks the Host for the continuous loop from the failed card', async () => {
+    // The one-click difference: a single retry mostly lands in the same full
+    // queue, so the card also offers the Host-owned loop.
+    const { retryAll, retried } = renderPanel({ generations: [failedVideo()] })
+    await screen.findByText('a queue test')
+    expect(screen.getByRole('button', { name: translate('gallery.retry') })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: translate('gallery.retryAll') }))
+    await waitFor(() => expect(retried).toHaveLength(1))
+    // The flag is what turns the loop on; without it the click is just a retry.
+    expect(retryAll).toEqual([true])
+  })
+
+  it('keeps a plain retry single-shot', async () => {
+    const { retryAll } = renderPanel({ generations: [failedVideo()] })
+    await screen.findByText('a queue test')
+    fireEvent.click(screen.getByRole('button', { name: translate('gallery.retry') }))
+    await waitFor(() => expect(retryAll).toHaveLength(1))
+    expect(retryAll).toEqual([false])
+  })
+
+  it('counts down while a continuous retry waits for the next attempt', async () => {
+    // Nothing is being generated during the wait, so the card must look like it is
+    // waiting and must say which attempt is next.
+    const failed = failedVideo()
+    const failedAt = Date.parse(failed.createdAt)
+    const until = new Date(failedAt + 30_000).toISOString()
+    renderPanel({
+      generations: [failed],
+      running: [
+        {
+          id: failed.id,
+          kind: 'video',
+          prompt: failed.prompt,
+          model: failed.model,
+          startedAt: '2026-11-11T00:00:00.000Z',
+          retryOf: failed.id,
+          attempt: 2,
+          maxAttempts: 5,
+          nextAttemptAt: until,
+        },
+      ],
+    })
+
+    const card = await waitFor(() => {
+      const found = document.querySelector('.agnes__card--retrying')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    expect(card.textContent).toContain(translate('retry.attempt', { index: 2, total: 5 }))
+    // The countdown reads from the Host's own deadline, so it renders as a
+    // remaining-seconds phrase rather than a fixed label.
+    expect(card.textContent).toMatch(/秒后自动重试/)
+    // Waiting is not working: the shimmer is static.
+    expect(card.querySelector('.agnes__pendingShine--waiting')).not.toBeNull()
+    // And the wait is cancellable.
+    expect(within(card).getByRole('button', { name: translate('action.cancelJob') })).toBeTruthy()
+  })
+
+  it('shows the attempt counter while an attempt is actually running', async () => {
+    const failed = failedVideo()
+    renderPanel({
+      generations: [failed],
+      running: [
+        {
+          id: failed.id,
+          kind: 'video',
+          prompt: failed.prompt,
+          model: failed.model,
+          startedAt: '2026-11-11T00:00:00.000Z',
+          retryOf: failed.id,
+          attempt: 3,
+          maxAttempts: 5,
+        },
+      ],
+    })
+    const card = await waitFor(() => {
+      const found = document.querySelector('.agnes__card--retrying')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    expect(card.textContent).toContain(translate('retry.attempt', { index: 3, total: 5 }))
+    expect(card.querySelector('.agnes__pendingShine--waiting')).toBeNull()
+    expect(card.querySelector('.agnes__spinner')).not.toBeNull()
+  })
+
+  it('reports how many attempts a settled record took', async () => {
+    const failed = { ...failedVideo(), attempts: 4 }
+    renderPanel({ generations: [failed] })
+    await screen.findByText('a queue test')
+    expect(screen.getByText(translate('gallery.attempts', { count: 4 }))).toBeTruthy()
+  })
+})
+
 describe('image viewer', () => {
   /** One stored image generation, ready to open. */
   function imageGeneration(overrides: Partial<Generation> = {}): Generation {

@@ -324,6 +324,15 @@ export interface Generation {
   readonly error?: string
   /** True when the failure is worth retrying unchanged (queue full, 5xx). */
   readonly retryable?: boolean
+  /**
+   * How many attempts this record represents, when continuous retry ran.
+   *
+   * A normal single attempt leaves this absent (it means exactly one try); an
+   * auto-retried record counts every failed try before the one that settled, so
+   * a card that is still failing can say "第 3 次尝试失败" instead of looking
+   * identical to the first failure.
+   */
+  readonly attempts?: number
   /** Upstream task id for video generations, useful when reporting a bug. */
   readonly upstreamId?: string
   /**
@@ -367,6 +376,25 @@ export interface RunningJob {
   readonly startedAt: string
   /** The record this job replaces on settle, when it is a retry. */
   readonly retryOf?: string
+  /**
+   * The stored record this job continues ("继续编辑"), when it does.
+   *
+   * Same provenance the settled record will carry in `derivedFrom`, published
+   * early so the gallery can put the in-flight version INTO its stack instead of
+   * showing a detached placeholder beside it.
+   */
+  readonly derivedFrom?: string
+  /** 1-based number of the attempt running right now. */
+  readonly attempt?: number
+  /** Attempts this job will make in total; above 1 only under continuous retry. */
+  readonly maxAttempts?: number
+  /**
+   * ISO time the next attempt starts, while the job waits between tries.
+   *
+   * Continuous retry is Host-owned, so the panel must be told when the wait ends
+   * rather than guessing: absent means "an attempt is running right now".
+   */
+  readonly nextAttemptAt?: string
 }
 
 /** Host capabilities and configuration state the dashboard shows. */
@@ -447,7 +475,18 @@ export type StudioRequest =
       /** Id of the failed record being retried, when this starts a retry. */
       readonly retryOf?: string
     }
-  | { readonly action: 'retry'; readonly id: string }
+  | {
+      readonly action: 'retry'
+      readonly id: string
+      /**
+       * Keep retrying a retryable failure until the Host's attempt budget runs out.
+       *
+       * The free video queue is full for minutes at a time, so a single retry
+       * usually lands in the same full queue. Opting in moves the wait loop onto
+       * the Host, where it survives the panel being closed.
+       */
+      readonly retryAll?: boolean
+    }
   | { readonly action: 'cancel'; readonly id: string }
   | { readonly action: 'optimize'; readonly prompt: string; readonly kind: MediaKind }
   | { readonly action: 'delete'; readonly id: string }
