@@ -27,7 +27,13 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+  WheelEvent as ReactWheelEvent,
+} from 'react'
 import type { ClientApi } from './api.js'
 import { ActionError } from './api.js'
 import type { ClientLocaleLike, SidebarEntryProps } from './contracts.js'
@@ -412,10 +418,12 @@ const IconLayers = (): JSX.Element => (
   </Glyph>
 )
 
-const IconFlip = (): JSX.Element => (
-  <Glyph size={11}>
-    <path d="M8 9.5 12 5.5l4 4" />
-    <path d="M8 14.5l4 4 4-4" />
+/** A two-finger horizontal swipe, the gesture that flips the pile. */
+const IconSwipe = (): JSX.Element => (
+  <Glyph size={12}>
+    <path d="M4 8.5 7.5 12 4 15.5" />
+    <path d="M20 8.5 16.5 12 20 15.5" />
+    <path d="M10 12h4" />
   </Glyph>
 )
 
@@ -1303,66 +1311,81 @@ export function chainsOf(generations: readonly Generation[]): VersionChain[] {
 }
 
 /**
- * How many versions behind the front are drawn as peeking layers.
+ * How many neighbouring versions peek out from behind the front picture.
  *
- * Two is enough to read as a pile of sheets; the badge and the pills state the
- * real count, so a chain of eight does not need eight layers of decoration.
+ * Two per side is enough to read as a pile of photos, which is the whole
+ * metaphor: WeChat's "合并展示" shows the front picture with the next ones
+ * fanning out behind it. Three or more would turn a 190px card into a fan; the
+ * badge and the rail state the real count.
  */
-const STACK_PEEK = 2
+const STACK_SLIVERS = 2
 
 /**
- * The narrowest vertical band, in CSS pixels, that one version may occupy.
+ * How far, in CSS pixels, a horizontal wheel gesture must travel to flip.
  *
- * A chain of eight versions over a 150px picture would otherwise give each
- * version an 18px band, and the pointer would skip three versions while crossing
- * one line of text. Coalescing the bands keeps every reachable version worth a
- * deliberate move; the pills stay the precise control.
+ * Trackpads emit a stream of small deltas during one two-finger swipe, so the
+ * travel is accumulated and reset after each flip: one flick is one version,
+ * and a long flick can walk several. The threshold is deliberately small — this
+ * should feel like the photo piles in a chat app, not like a scroll barrier.
  */
-const SCRUB_MIN_BAND = 14
+const SWIPE_COMMIT = 26
 
 /**
- * The version indices a vertical scrub can land on.
- *
- * The oldest version is always a slot, even when the stride would skip past it: a
- * gesture that cannot reach the end of the chain reads as broken rather than as
- * imprecise.
+ * How far a pointer must travel horizontally before it counts as a drag rather
+ * than a click on the picture.
  */
-export function scrubSlots(count: number, height: number): number[] {
-  const stride = Math.max(1, Math.ceil(SCRUB_MIN_BAND / (height / count)))
-  const slots: number[] = []
-  for (let at = 0; at < count - 1; at += stride) slots.push(at)
-  slots.push(count - 1)
-  return slots
+const DRAG_START = 12
+
+/** How far a drag must travel to commit to the neighbouring version. */
+const DRAG_COMMIT = 44
+
+/** How long the "flipping" state lasts after the last wheel or drag input. */
+const SWIPE_IDLE_MS = 420
+
+/**
+ * The version index a flip lands on.
+ *
+ * Clamped, not wrapped: this is a pile of prints with two ends, and a swipe at
+ * the end that silently jumped back to the other end would read as an ignored
+ * input. Every version stays reachable from the numbered rail.
+ */
+export function stepIndex(index: number, count: number, step: number): number {
+  if (count <= 1) return 0
+  const next = index + step
+  if (next < 0) return 0
+  if (next > count - 1) return count - 1
+  return next
 }
 
 /**
- * One lineage rendered as a stack of versions.
+ * One lineage rendered as a pile of versions, like a chat app's merged photos.
  *
  * ## Interaction contract
  *
- * Two gestures, because they answer two different needs:
+ * - **Flip.** A horizontal gesture over the picture — a trackpad two-finger
+ *   swipe, shift+wheel, a pointer drag, or the left/right arrow keys once
+ *   anything in the stack has focus — moves one version at a time. The
+ *   neighbouring versions are visible as slivers of their own pictures on
+ *   either side, so the pile says what a swipe will reach before it is used.
+ * - **Commit.** The version on the face of the pile IS the card: its picture,
+ *   its prompt, its facts and its action row. Flipping to an older version is
+ *   therefore also how that version is opened, downloaded, continued or
+ *   deleted.
+ * - **Jump.** The numbered rail below the pile commits to a version directly.
+ * - **Escape hatch.** 展开 replaces the pile with one card per version.
  *
- * - **Look.** Moving the pointer over the picture scrubs through the versions
- *   (the top band is the newest). It is a preview and it commits nothing; the
- *   pointer leaving the whole stack returns to the committed version.
- * - **Commit.** Clicking a numbered pill makes that version the card's subject,
- *   including its action row, so an older version can be opened, downloaded,
- *   continued or deleted without expanding the stack first.
+ * ## Why flipping cannot shake the card
  *
- * Plus one escape hatch: 展开 replaces the stack with one card per version, which
- * is the only view where every version's actions are visible at once.
- *
- * ## Why the card is layered instead of re-rendered
- *
- * The first version of this component swapped `generation` on one card, and it
- * shook: React remounted the card on every band crossing, which replaced the
- * <img> element (a fresh element means a fresh decode and an empty frame), reset
- * the CSS hover transition, and let a taller facts row change the card's height —
- * so the pointer was scrubbing a target that moved and flashed under it. Here
- * every version keeps its own media and body mounted, only one of each is
- * visible, and the picture area is a fixed aspect ratio. Version changes are then
- * a pure crossfade with zero layout movement, which is what makes the gesture
- * feel like flipping through prints rather than watching the card flicker.
+ * The first two attempts at this component each found a different way to make
+ * the card move under the pointer: the original remounted one card per version
+ * (a fresh <img> means a fresh decode and an empty frame), and the second
+ * reserved its depth with a taller card and a vertical hot zone, so crossing a
+ * band changed the layout that was being measured. Here the geometry is fixed
+ * before any gesture begins: every version's shot and body stay mounted, all
+ * bodies share one grid cell, the picture is a fixed 4:3 box, and both side
+ * bands are always reserved. A flip is then an opacity crossfade plus, at most,
+ * a small paint-only transform on the picture — never a reflow, a resize, or a
+ * remount.
  */
 function VersionStack(props: {
   t: Translate
@@ -1385,21 +1408,34 @@ function VersionStack(props: {
   const { t, chain, expanded, onExpand, pendingFrom, disabled, refiningId } = props
   const { members, head } = chain
   /**
-   * The version the user committed to, or null for "whatever is newest".
+   * The version the user flipped or clicked to, or null for "whatever is newest".
    *
    * Held as a record id rather than an index on purpose: a new version settling
-   * shifts every index by one, and an index-based pin would silently slide to a
-   * different picture exactly when the user is watching the new one arrive.
+   * shifts every index by one, and an index-based selection would silently slide
+   * to a different picture exactly when the user is watching the new one arrive.
    */
   const [pinnedId, setPinnedId] = useState<string | null>(null)
-  /** The version under the pointer right now, or null when not scrubbing. */
-  const [previewId, setPreviewId] = useState<string | null>(null)
-  const frameRef = useRef<HTMLDivElement | null>(null)
+  /** Whether a flip gesture ran recently enough to hide the hint pill. */
+  const [flipping, setFlipping] = useState(false)
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  const mediaRef = useRef<HTMLDivElement | null>(null)
+  /** Wheel travel accumulated inside the current gesture. */
+  const wheelRef = useRef({ travel: 0, at: 0 })
+  /** The drag in progress, or null. Tracked in a ref so a move never renders. */
+  const dragRef = useRef<{ x: number; y: number; dx: number; active: boolean } | null>(null)
+  /** When a drag last ended, so the picture's click can be suppressed. */
+  const draggedAt = useRef(0)
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const wanted = previewId ?? pinnedId
-  const at = wanted === null ? -1 : members.findIndex((member) => member.id === wanted)
-  // A pinned or previewed version can be deleted or evicted while it is on
-  // screen, so the resolved index is clamped instead of trusted.
+  useEffect(() => {
+    return () => {
+      if (idleTimer.current !== null) clearTimeout(idleTimer.current)
+    }
+  }, [])
+
+  const at = pinnedId === null ? -1 : members.findIndex((member) => member.id === pinnedId)
+  // A selected version can be deleted or evicted while it is on the face of the
+  // pile, so the resolved index is clamped instead of trusted.
   const index = at < 0 ? 0 : at
   const current = members[index] ?? head
   const retryJobOf = (generation: Generation): RunningJob | undefined => props.retryJobs.get(generation.id)
@@ -1434,7 +1470,7 @@ function VersionStack(props: {
     />
   )
 
-  // One version is not a stack: it keeps the ordinary card, chrome free.
+  // One version is not a pile: it keeps the ordinary card, chrome free.
   if (members.length === 1) {
     const job = retryJobOf(head)
     return (
@@ -1500,120 +1536,261 @@ function VersionStack(props: {
   }
 
   /**
-   * Scrub: the pointer's vertical position over the PICTURE picks a version.
+   * Move to a version by index.
    *
-   * Scoped to the picture rather than the whole card, because the action row is
-   * where the user is heading to click something. Once a version is previewed it
-   * stays previewed until the pointer leaves the stack entirely — otherwise
-   * travelling from the picture down to the buttons would silently swap the
-   * buttons out from under the pointer.
+   * Index 0 is the newest, and landing there clears the pin instead of pinning
+   * it, so "follow new versions" stays reachable after the user has flipped
+   * away — a freshly generated edit then still arrives on the face of the pile.
    */
-  const onMove = (event: ReactMouseEvent<HTMLElement>): void => {
-    const frame = frameRef.current
-    if (frame === null) return
-    const box = frame.getBoundingClientRect()
-    if (box.height <= 0) return
-    if (event.clientY < box.top || event.clientY > box.bottom) return
-    const ratio = Math.min(1, Math.max(0, (event.clientY - box.top) / box.height))
-    const slots = scrubSlots(members.length, box.height)
-    const slot = slots[Math.min(slots.length - 1, Math.floor(ratio * slots.length))]
-    const next = slot === undefined ? undefined : members[slot]
-    if (next === undefined || next.id === current.id) return
-    setPreviewId(next.id)
+  const land = (target: number): void => {
+    const next = members[target]
+    if (next === undefined) return
+    setPinnedId(target === 0 ? null : next.id)
+  }
+  const flip = (step: number): void => land(stepIndex(index, members.length, step))
+
+  /** Keep the hint pill hidden for the duration of one gesture. */
+  const markFlipping = (): void => {
+    setFlipping(true)
+    if (idleTimer.current !== null) clearTimeout(idleTimer.current)
+    idleTimer.current = setTimeout(() => setFlipping(false), SWIPE_IDLE_MS)
   }
 
   /**
-   * The versions drawn as slivers behind the front card.
+   * Trackpad and shift+wheel flipping.
    *
-   * Chosen by EXCLUSION of the visible version rather than by position: pinning
-   * version 1 of a two-version chain would otherwise peek version 1 again, so the
-   * pile would show the same picture twice and the depth would read as a glitch.
-   * Excluding the current version also means the slivers are always of versions
-   * the user is not already looking at, which is what makes them worth showing.
+   * A vertical wheel is not ours: the gallery column scrolls, and swallowing
+   * that would strand a user whose pointer happens to rest on a picture. Only a
+   * horizontal intent flips, and it accumulates so one flick is one version.
    */
-  const peekMembers = members.filter((member) => member.id !== current.id).slice(0, STACK_PEEK)
-  const peeks = peekMembers.length
+  const onWheel = (event: ReactWheelEvent<HTMLDivElement>): void => {
+    const horizontal = event.shiftKey && Math.abs(event.deltaX) < 1 ? event.deltaY : event.deltaX
+    if (Math.abs(horizontal) < 0.5) return
+    const wheel = wheelRef.current
+    const now = Date.now()
+    if (now - wheel.at > SWIPE_IDLE_MS) wheel.travel = 0
+    wheel.at = now
+    wheel.travel += horizontal
+    markFlipping()
+    if (Math.abs(wheel.travel) < SWIPE_COMMIT) return
+    // A positive deltaX means the content itself travels left, which is the
+    // gesture that pulls the next print — the older version fanned out on the
+    // right — into view. Negative travels back toward the newest.
+    const step = wheel.travel > 0 ? 1 : -1
+    wheel.travel = 0
+    flip(step)
+  }
+
+  /** Start tracking a possible drag over the picture. */
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return
+    dragRef.current = { x: event.clientX, y: event.clientY, dx: 0, active: false }
+  }
+
+  /**
+   * Follow the pointer once the gesture is clearly horizontal.
+   *
+   * The picture shifts by a third of the travel and never by more than 28px, so
+   * the drag reads as "this is a sheet I am moving" without ever revealing the
+   * gap behind it. It is a transform on the shots only: paint, not layout.
+   */
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current
+    if (drag === null) return
+    const dx = event.clientX - drag.x
+    const dy = event.clientY - drag.y
+    if (!drag.active) {
+      // A vertical move belongs to the scrolling column under the finger.
+      if (Math.abs(dx) < DRAG_START || Math.abs(dx) <= Math.abs(dy)) return
+      drag.active = true
+      markFlipping()
+      try {
+        stageRef.current?.setPointerCapture(event.pointerId)
+      } catch {
+        // jsdom and older engines do not implement pointer capture; the gesture
+        // still works while the pointer stays over the stack.
+      }
+    }
+    drag.dx = dx
+    mediaRef.current?.style.setProperty('--agnes-drag', `${Math.max(-28, Math.min(28, dx * 0.34))}px`)
+  }
+
+  /** Decide on release whether the drag flipped a version or was a click. */
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current
+    dragRef.current = null
+    mediaRef.current?.style.removeProperty('--agnes-drag')
+    if (drag === null || !drag.active) return
+    draggedAt.current = Date.now()
+    try {
+      stageRef.current?.releasePointerCapture(event.pointerId)
+    } catch {
+      // See setPointerCapture: capture is an optimisation, not a requirement.
+    }
+    if (Math.abs(drag.dx) < DRAG_COMMIT) return
+    flip(drag.dx > 0 ? -1 : 1)
+  }
+
+  /**
+   * A drag ends where it started, over a button that opens the viewer: without
+   * this the release would also count as a click and open the lightbox the user
+   * was only trying to flip past.
+   */
+  const onClickCapture = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    if (Date.now() - draggedAt.current > 250) return
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  /** Arrow keys flip once focus is anywhere inside the pile (media or rail). */
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'ArrowRight') {
+      flip(1)
+      event.preventDefault()
+      return
+    }
+    if (event.key === 'ArrowLeft') {
+      flip(-1)
+      event.preventDefault()
+    }
+  }
+
+  /**
+   * The versions fanning out behind the face of the pile.
+   *
+   * Each sliver paints the neighbour's OWN picture, cropped to a narrow strip,
+   * which is what makes the pile read as "more prints underneath" instead of as
+   * a decorative bar: the same cue a chat app uses for merged photos. They are
+   * keyed by record id and excluded from the hit test, so a stack whose picture
+   * is being dragged cannot lose the pointer to a sliver.
+   */
+  /**
+   * The versions fanning out behind the face of the pile, per side.
+   *
+   * Each strip is the neighbour's OWN picture cropped to a narrow band, which is
+   * what makes the pile read as "more prints underneath" instead of as a
+   * decorative bar: the same cue a chat app uses for merged photos.
+   */
+  const leftMembers: Generation[] = []
+  const rightMembers: Generation[] = []
+  for (let offset = 1; offset <= STACK_SLIVERS; offset += 1) {
+    const older = members[index + offset]
+    if (older !== undefined) rightMembers.push(older)
+    const newer = members[index - offset]
+    if (newer !== undefined) leftMembers.push(newer)
+  }
+
+  /**
+   * One strip of the fan: a neighbour's own picture, cropped to the gutter.
+   *
+   * These are real elements sitting BESIDE the front print, at a z-index ABOVE
+   * the card. Both of the alternatives fail for observable reasons:
+   * - as siblings BELOW the card, the card's box shadow spreads over the whole
+   *   gutter and paints them out;
+   * - as a background or pseudo-element of the stage, the layer is painted under
+   *   the same shadow, so the strips are drawn and invisible at once.
+   * Above the card is the only place outside its border box that survives its
+   * shadow — and because the strips never overlap the card's box, being above it
+   * covers nothing but the shadow they are meant to replace.
+   */
+  const strip = (member: Generation, side: 'left' | 'right', layer: number): JSX.Element => {
+    const src = member.asset !== undefined && member.kind === 'image' ? member.asset.src : undefined
+    return (
+      <span
+        key={`${side}-${member.id}`}
+        className="agnes__stackStrip"
+        data-side={side}
+        data-layer={layer}
+        /* The picture is a CSS background, and the src is mirrored in a data
+           attribute. Two reasons: the strip is 11px wide, so an <img> with
+           object-fit has to guess which slice to show and can end up painting
+           the part of the shot that happens to be uniform; a background with
+           `cover` plus a centered position is the same crop the browser already
+           does for the card, and it renders in this gutter where a nested
+           replaced element did not. The attribute keeps the strip checkable:
+           "the style mentions a url" is not evidence anything was drawn. */
+        {...(src === undefined ? {} : { 'data-src': src, style: { backgroundImage: `url("${src}")` } })}
+        aria-hidden="true"
+      />
+    )
+  }
+
   return (
     <div
-      className="agnes__stack agnes__stack--layered"
-      data-peeks={peeks}
-      data-scrubbing={previewId === null ? 'false' : 'true'}
-      /* Leaving the stack is the one thing that returns to the committed
-         version: leaving just the picture must not, because the action row sits
-         directly below it. */
-      onMouseLeave={() => setPreviewId(null)}
-      onMouseMove={onMove}
+      className="agnes__stack agnes__stack--pile"
+      data-flipping={flipping ? 'true' : 'false'}
+      onKeyDown={onKeyDown}
+      role="group"
+      aria-label={t('stack.versions', { count: members.length })}
     >
-      {/* The peeks are slivers of the versions behind the front one, cropped to
-          their top edge: greyscale lines say "decoration", the actual pictures
-          say "there are other shots of this, stacked". Decoration only — a peek
-          that took the pointer would dead-zone the scrub exactly where the stack
-          looks three deep. */}
-      {peekMembers.map((member, layer) => (
-        <span
-          key={member.id}
-          className="agnes__stackPeek"
-          data-layer={layer}
-          aria-hidden="true"
-          {...(member.asset === undefined || member.kind !== 'image'
-            ? {}
-            : { style: { backgroundImage: `url("${member.asset.src}")` } })}
-        />
-      ))}
-      <article className={cardClassName(current, props.retryingIds.has(current.id), refiningId === current.id, ' agnes__card--stacked')}>
-        <div className="agnes__stackMedia" ref={frameRef} title={t('stack.hoverHint')}>
-          {members.map((member, position) => (
-            <div
-              key={member.id}
-              className={position === index ? 'agnes__stackShot agnes__stackShot--on' : 'agnes__stackShot'}
-              /* Only the visible version is exposed: the hidden ones are still
-                 in the DOM (that is what makes the crossfade instant), and
-                 without this they would duplicate every button and every
-                 picture description for a screen reader and for role queries. */
-              aria-hidden={position === index ? undefined : 'true'}
-            >
-              {mediaOf(member)}
+      <div
+        className="agnes__stackStage"
+        ref={stageRef}
+        title={t('stack.hint')}
+        data-fan={leftMembers.map((member) => `left:${member.id}`).concat(rightMembers.map((member) => `right:${member.id}`)).join('|')}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onClickCapture={onClickCapture}
+      >
+        {/* Older versions fan out to the right of the face of the pile, newer
+            ones to the left once the user has flipped away from the newest. */}
+        {leftMembers.map((member, layer) => strip(member, 'left', layer))}
+        {rightMembers.map((member, layer) => strip(member, 'right', layer))}
+        <article className={cardClassName(current, props.retryingIds.has(current.id), refiningId === current.id, ' agnes__card--stacked')}>
+          <div className="agnes__stackMedia" ref={mediaRef}>
+            {members.map((member, position) => (
+              <div
+                key={member.id}
+                className={position === index ? 'agnes__stackShot agnes__stackShot--on' : 'agnes__stackShot'}
+                /* Only the visible version is exposed: the hidden ones are still
+                   in the DOM (that is what makes the crossfade instant), and
+                   without this they would duplicate every button and every
+                   picture description for a screen reader and for role queries. */
+                aria-hidden={position === index ? undefined : 'true'}
+              >
+                {mediaOf(member)}
+              </div>
+            ))}
+            <div className="agnes__stackBadge">
+              <IconLayers />
+              {t('stack.badge', { index: index + 1, total: members.length })}
             </div>
-          ))}
-          <div className="agnes__stackBadge">
-            <IconLayers />
-            {t('stack.badge', { index: index + 1, total: members.length })}
-          </div>
-          {/* The gesture is invisible until someone tries it, so the picture
-              advertises it on hover. It is rendered unconditionally and shown by
-              CSS so that entering the stack never costs a React render, and it
-              fades out the moment the user actually scrubs — the badge takes
-              over from there, and a permanent label would just be clutter. */}
-          <div className="agnes__stackScrubHint" aria-hidden="true">
-            <IconFlip />
-            {t('stack.scrubHint')}
-          </div>
-        </div>
-        {/*
-         * Every body shares one grid cell, so the card is always as tall as its
-         * tallest version and scrubbing between versions cannot change its
-         * height. That is the layout half of "it shook".
-         */}
-        <div className="agnes__stackBodies">
-          {members.map((member, position) => (
-            <div
-              key={member.id}
-              className={position === index ? 'agnes__stackBody' : 'agnes__stackBody agnes__stackBody--off'}
-              aria-hidden={position === index ? undefined : 'true'}
-            >
-              {bodyOf(member)}
+            {/* The gesture is invisible until someone tries it, so the picture
+                advertises it on hover. Rendered unconditionally and shown by CSS
+                so entering the pile never costs a React render, and retired as
+                soon as the user actually flips — from then on the badge already
+                explains what happened. */}
+            <div className="agnes__stackHint" aria-hidden="true">
+              <IconSwipe />
+              {t('stack.hintShort')}
             </div>
-          ))}
-        </div>
-      </article>
+          </div>
+          {/*
+           * Every body shares one grid cell, so the card is always as tall as its
+           * tallest version and flipping between versions cannot change its
+           * height. That is the layout half of "it shook".
+           */}
+          <div className="agnes__stackBodies">
+            {members.map((member, position) => (
+              <div
+                key={member.id}
+                className={position === index ? 'agnes__stackBody' : 'agnes__stackBody agnes__stackBody--off'}
+                aria-hidden={position === index ? undefined : 'true'}
+              >
+                {bodyOf(member)}
+              </div>
+            ))}
+          </div>
+        </article>
+      </div>
       <div className="agnes__stackBar">
         <div
           className="agnes__stackPills"
           role="group"
           aria-label={t('stack.versions', { count: members.length })}
-          /* Cleared when the pointer leaves the GROUP, so travelling from one
-             pill to the next never blanks the preview in between. */
-          onMouseLeave={() => setPreviewId(null)}
         >
           {members.map((member, position) => (
             <button
@@ -1623,20 +1800,14 @@ function VersionStack(props: {
               aria-current={position === index ? 'true' : undefined}
               aria-label={t('stack.version', { index: position + 1 })}
               title={t('stack.version', { index: position + 1 })}
-              onMouseEnter={() => setPreviewId(member.id)}
-              onClick={() => {
-                // Clicking the newest pill clears the pin instead of pinning the
-                // newest, so "follow new versions" stays reachable after a pin.
-                setPinnedId(position === 0 ? null : member.id)
-                setPreviewId(null)
-              }}
+              onClick={() => setPinnedId(position === 0 ? null : member.id)}
             >
               {position + 1}
             </button>
           ))}
         </div>
         {/* A new version being generated from one of these results is part of the
-            story, so the stack says so. The placeholder card itself stays in the
+            story, so the pile says so. The placeholder card itself stays in the
             grid: it is a JOB with no record yet, and hiding it would make the
             panel look idle while work is really running. */}
         {pendingFrom === undefined ? null : (
@@ -1834,6 +2005,11 @@ function CardMedia(props: {
           alt={generation.prompt.slice(0, 160)}
           loading={eager ? 'eager' : 'lazy'}
           decoding="async"
+          /* A native image drag would start the browser's own drag-and-drop and
+             fire pointercancel, which is exactly the gesture the pile listens
+             for. Nothing in this panel needs to drag a picture out, so the
+             thumbnail is never a drag source. */
+          draggable={false}
         />
         <span className="agnes__thumbVeil">
           <span className="agnes__thumbVeilInner">

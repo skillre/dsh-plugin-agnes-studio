@@ -1,0 +1,59 @@
+{
+  "package": "@skillre/dsh-plugin-agnes-studio",
+  "version": "0.6.0",
+  "dsh": "0.2.2-rc.2",
+  "tarball": {
+    "path": "/Users/skillre/dsh-plugins/repos/dsh-plugin-agnes-studio/skillre-dsh-plugin-agnes-studio-0.6.0.tgz",
+    "sha256": "6afbdecf2d94bd7c52c798daca474c30fb8aefa1d8adc134eb03de935ae0a0e0"
+  },
+  "profile": "agnes-studio-test-7a177131",
+  "checks": [
+    "command: dsh --version -> exit 0",
+    "dsh-version",
+    "command: dsh --profile agnes-studio-test-7a177131 --from-default-profile web --dump-config -> exit 0",
+    "profile-template-created",
+    "command: dsh plugin --profile agnes-studio-test-7a177131 add /Users/skillre/dsh-plugins/repos/dsh-plugin-agnes-studio/skillre-dsh-plugin-agnes-studio-0.6.0.tgz --ignore-scripts --store-dir /private/var/folders/k5/plnkf7qs5992_9713c_b34nc0000gn/T/dsh-agnes-studio-mount-81IsuC/pnpm-store -> exit 0",
+    "profile-tarball-install",
+    "packed-dependency-and-selection",
+    "command: dsh --profile agnes-studio-test-7a177131 --dump-config -> exit 0",
+    "dump-config",
+    "packed-payload-present",
+    "bounded-startup",
+    "api-state",
+    "api-refuses-invalid-envelope",
+    "api-refuses-wrong-model: agnes-studio/invalid-model",
+    "api-media-unknown-404",
+    "api-auth-fence",
+    "tools-enabled-by-config",
+    "api-job-reported-running",
+    "api-generate-image",
+    "api-media-bytes",
+    "storage-persistence-across-restart",
+    "storage-artifact-across-restart",
+    "api-delete-removes-file"
+  ],
+  "endpoint": {
+    "state": {
+      "configured": true,
+      "keySource": "credential",
+      "models": 0
+    },
+    "generate": {
+      "id": "983a55da-fba9-4cef-a31d-99d898104db8",
+      "mediaType": "image/png",
+      "bytes": 873028,
+      "durationMs": 13498
+    },
+    "media": {
+      "bytes": 873028,
+      "contentType": "image/png"
+    }
+  },
+  "cleanup": {
+    "ownedRoot": "/private/var/folders/k5/plnkf7qs5992_9713c_b34nc0000gn/T/dsh-agnes-studio-mount-81IsuC",
+    "profile": "agnes-studio-test-7a177131",
+    "processesStopped": true,
+    "rootRemoved": true,
+    "verified": true
+  }
+}

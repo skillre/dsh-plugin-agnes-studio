@@ -1,5 +1,5 @@
 {
-  "at": "2026-11-12T09:54:24.472Z",
+  "at": "2026-11-12T16:14:52.100Z",
   "dsh": "unknown",
   "checks": [
     "browser-app-boot",
@@ -15,7 +15,7 @@
     "browser-refuses-empty-prompt: 请先填写提示词",
     "browser-gallery-card-grid: 2 cards, 生成记录",
     "browser-gallery-filters: 图片 2 / 视频 0 -> 这个分类下还没有记录切换到「全部」可以看到其它类型的结果。",
-    "browser-theme-toggle: light rgb(255, 255, 255) -> dark rgb(35, 35, 36)",
+    "browser-theme-toggle: dark rgb(35, 35, 36) -> light rgb(255, 255, 255)",
     "browser-locale-dictionary: Agnes 工作室",
     "browser-gallery-card: 512px source in a 4:3 frame",
     "browser-viewer-opens: 512x512 at 100%",
@@ -36,12 +36,17 @@
     "browser-retry-settles-in-place: 3 images, 3 cards",
     "browser-continue-editing-prefills: source thumbnail, prompt and card count preserved",
     "browser-continue-editing-settles: 3 cards, 1 stack of 2 versions, lineage on top",
-    "browser-stack-hover-scrub: swept 7 bands, card box constant",
-    "browser-stack-rail-pin: older version pinned, box unchanged, newest restored",
-    "browser-stack-dark-theme: peek renders its picture in the dark theme",
+    "browser-stack-pile-look: one neighbour strip, 11x303px painting its own picture in a 13px gutter, above the card shadow",
+    "browser-stack-vertical-scroll: a vertical wheel did not flip (the fixture column had no overflow to scroll)",
+    "browser-stack-swipe-flips: one swipe to the older version, card box constant (/api/agnes-studio/media?id=3f2b6c1e-9a4d-4c8b-9f61-2d7e5a0b4c33)",
+    "browser-stack-swipe-back: the opposite swipe returns to the newest version",
+    "browser-stack-drag-flips: picture follows the drag (-28px), no viewer opened, box constant (/api/agnes-studio/media?id=3f2b6c1e-9a4d-4c8b-9f61-2d7e5a0b4c33)",
+    "browser-stack-arrow-keys: ArrowLeft returns to the newest version, box constant",
+    "browser-stack-rail-pin: older version pinned, strips swapped sides, box unchanged, newest restored",
+    "browser-stack-dark-theme: the fanned-out strip renders its picture in the dark theme",
     "browser-stack-expand-collapse: 4 cards expanded, 3 stacked",
     "browser-continue-editing-lineage: derivedFrom + symbolic reference kept in the store",
-    "browser-stack-deep-chain: 6 versions, 6 records, rail unclipped, height constant",
+    "browser-stack-deep-chain: 6 versions, 6 records, rail unclipped, 5 swipe stops, height constant",
     "browser-console-clean"
   ]
 }

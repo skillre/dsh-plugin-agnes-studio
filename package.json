@@ -1,6 +1,6 @@
 {
   "name": "@skillre/dsh-plugin-agnes-studio",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Agnes AI 免费生图与生视频工作台：侧栏看板、可调参数的图片/视频生成，以及会话内可调用的 DSH 工具",
   "icon": "./icon.svg",
   "type": "module",

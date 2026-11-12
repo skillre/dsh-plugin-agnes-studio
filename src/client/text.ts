@@ -132,8 +132,8 @@ export const zh: Record<string, string> = {
   'refine.cancel': '退出编辑',
 
   'stack.badge': '第 {index} / {total} 版',
-  'stack.hoverHint': '在图上上下移动可翻看，点数字可固定某一版',
-  'stack.scrubHint': '上下移动翻看版本',
+  'stack.hint': '左右滑动（触控板 / 拖动）翻看版本，点数字直接跳转',
+  'stack.hintShort': '左右滑动翻看',
   'stack.version': '第 {index} 版',
   'stack.followNewest': '已回到最新版',
   'stack.pinned': '已固定在第 {index} 版',
@@ -272,8 +272,8 @@ export const en: Record<string, string> = {
   'refine.cancel': 'Stop editing',
 
   'stack.badge': 'Version {index} of {total}',
-  'stack.hoverHint': 'Move up and down the picture to browse; click a number to pin',
-  'stack.scrubHint': 'Move up and down to flip versions',
+  'stack.hint': 'Swipe sideways (trackpad or drag) to flip versions; click a number to jump',
+  'stack.hintShort': 'Swipe to flip',
   'stack.version': 'Version {index}',
   'stack.followNewest': 'Back on the newest version',
   'stack.pinned': 'Pinned to version {index}',
