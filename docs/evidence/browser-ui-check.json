@@ -1,5 +1,5 @@
 {
-  "at": "2026-11-12T16:14:52.100Z",
+  "at": "2026-11-13T06:02:56.187Z",
   "dsh": "unknown",
   "checks": [
     "browser-app-boot",
@@ -15,7 +15,7 @@
     "browser-refuses-empty-prompt: 请先填写提示词",
     "browser-gallery-card-grid: 2 cards, 生成记录",
     "browser-gallery-filters: 图片 2 / 视频 0 -> 这个分类下还没有记录切换到「全部」可以看到其它类型的结果。",
-    "browser-theme-toggle: dark rgb(35, 35, 36) -> light rgb(255, 255, 255)",
+    "browser-theme-toggle: light rgb(255, 255, 255) -> dark rgb(35, 35, 36)",
     "browser-locale-dictionary: Agnes 工作室",
     "browser-gallery-card: 512px source in a 4:3 frame",
     "browser-viewer-opens: 512x512 at 100%",
@@ -36,7 +36,9 @@
     "browser-retry-settles-in-place: 3 images, 3 cards",
     "browser-continue-editing-prefills: source thumbnail, prompt and card count preserved",
     "browser-continue-editing-settles: 3 cards, 1 stack of 2 versions, lineage on top",
-    "browser-stack-pile-look: one neighbour strip, 11x303px painting its own picture in a 13px gutter, above the card shadow",
+    "browser-stack-pile-contained: full-width deck, fan painted over the picture edge (15x152px), no horizontal overflow",
+    "browser-stack-deal-motion: 2 prints positioned by offset with transform transitions",
+    "browser-stack-deal-animates: 16 intermediate transform frame(s) during one flip",
     "browser-stack-vertical-scroll: a vertical wheel did not flip (the fixture column had no overflow to scroll)",
     "browser-stack-swipe-flips: one swipe to the older version, card box constant (/api/agnes-studio/media?id=3f2b6c1e-9a4d-4c8b-9f61-2d7e5a0b4c33)",
     "browser-stack-swipe-back: the opposite swipe returns to the newest version",

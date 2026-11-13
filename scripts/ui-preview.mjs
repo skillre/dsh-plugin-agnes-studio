@@ -107,7 +107,13 @@ try {
   await mkdir(home)
   await mkdir(work)
   await run(['--profile', profile, '--from-default-profile', 'web', '--dump-config'])
-  await run(['plugin', '--profile', profile, 'add', tarball, '--ignore-scripts', '--store-dir', join(owned, 'pnpm-store')])
+  // Installing into a COLD pnpm store is a real network install of the tarball's
+  // dependencies: on a slow registry day it comfortably exceeds the default
+  // two minutes, and a timeout here looks exactly like a broken harness.
+  await run(
+    ['plugin', '--profile', profile, 'add', tarball, '--ignore-scripts', '--store-dir', join(owned, 'pnpm-store')],
+    300_000,
+  )
   const dump = await run(['--profile', profile, '--dump-config'])
   if (!dump.includes('skillre-agnes-studio')) throw new Error('bundle row did not compose')
 

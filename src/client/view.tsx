@@ -1343,6 +1343,51 @@ const DRAG_COMMIT = 44
 const SWIPE_IDLE_MS = 420
 
 /**
+ * How far one offset step from the face of the deck sits, as a fraction of the
+ * picture's width.
+ *
+ * The steps are small on purpose: this is a deck of prints being fanned, not a
+ * carousel. Anything past ~7% reads as a second picture competing with the face
+ * rather than as the edge of the next print.
+ */
+const DEAL_STEP_X = 0.075
+
+/** How much each step behind the face is scaled down. */
+const DEAL_STEP_SCALE = 0.035
+
+/** How far each step behind the face tilts, in degrees. */
+const DEAL_STEP_ROTATE = 2.4
+
+/**
+ * The CSS transform that places one print in the deck.
+ *
+ * `distance` is the signed offset from the face of the pile: 0 is the face, 1 is
+ * the next older print (which sits to the RIGHT, behind the face), -1 the next
+ * newer one to the left. Everything past ±2 parks at the same spot, so a long
+ * chain does not smear.
+ *
+ * Returned as a plain string rather than as CSS classes because it is the value
+ * CSS interpolates: on a flip, the print that used to be at +1 animates to 0
+ * while the print that used to be at 0 animates to -1, and both transitions run
+ * from their own stable endpoints. That is what produces the dealing motion —
+ * a print sliding up and squaring itself while the one it replaces falls away
+ * behind it — instead of the flat crossfade this used to be.
+ */
+export function dealTransform(distance: number): string {
+  const offset = Math.max(-2, Math.min(2, distance))
+  if (offset === 0) return 'translate3d(0, 0, 0) rotate(0deg) scale(1)'
+  const side = offset > 0 ? 1 : -1
+  const depth = Math.abs(offset)
+  const x = DEAL_STEP_X * 100 * depth * side
+  const scale = 1 - DEAL_STEP_SCALE * depth
+  const rotate = DEAL_STEP_ROTATE * side * depth
+  // A hair of downward travel: the print tucks under the face instead of
+  // sliding perfectly sideways, which is what makes it read as depth.
+  const y = depth * 1.5
+  return `translate3d(${x}%, ${y}px, 0) rotate(${rotate}deg) scale(${scale})`
+}
+
+/**
  * The version index a flip lands on.
  *
  * Clamped, not wrapped: this is a pile of prints with two ends, and a swipe at
@@ -1419,6 +1464,8 @@ function VersionStack(props: {
   const [flipping, setFlipping] = useState(false)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const mediaRef = useRef<HTMLDivElement | null>(null)
+  /** The deck of prints inside the picture area. */
+  const deckRef = useRef<HTMLDivElement | null>(null)
   /** Wheel travel accumulated inside the current gesture. */
   const wheelRef = useRef({ travel: 0, at: 0 })
   /** The drag in progress, or null. Tracked in a ref so a move never renders. */
@@ -1612,14 +1659,14 @@ function VersionStack(props: {
       }
     }
     drag.dx = dx
-    mediaRef.current?.style.setProperty('--agnes-drag', `${Math.max(-28, Math.min(28, dx * 0.34))}px`)
+    deckRef.current?.style.setProperty('--agnes-drag', `${Math.max(-28, Math.min(28, dx * 0.34))}px`)
   }
 
   /** Decide on release whether the drag flipped a version or was a click. */
   const endDrag = (event: ReactPointerEvent<HTMLDivElement>): void => {
     const drag = dragRef.current
     dragRef.current = null
-    mediaRef.current?.style.removeProperty('--agnes-drag')
+    deckRef.current?.style.removeProperty('--agnes-drag')
     if (drag === null || !drag.active) return
     draggedAt.current = Date.now()
     try {
@@ -1735,25 +1782,59 @@ function VersionStack(props: {
         onPointerCancel={endDrag}
         onClickCapture={onClickCapture}
       >
-        {/* Older versions fan out to the right of the face of the pile, newer
-            ones to the left once the user has flipped away from the newest. */}
-        {leftMembers.map((member, layer) => strip(member, 'left', layer))}
-        {rightMembers.map((member, layer) => strip(member, 'right', layer))}
         <article className={cardClassName(current, props.retryingIds.has(current.id), refiningId === current.id, ' agnes__card--stacked')}>
           <div className="agnes__stackMedia" ref={mediaRef}>
-            {members.map((member, position) => (
-              <div
-                key={member.id}
-                className={position === index ? 'agnes__stackShot agnes__stackShot--on' : 'agnes__stackShot'}
-                /* Only the visible version is exposed: the hidden ones are still
-                   in the DOM (that is what makes the crossfade instant), and
-                   without this they would duplicate every button and every
-                   picture description for a screen reader and for role queries. */
-                aria-hidden={position === index ? undefined : 'true'}
-              >
-                {mediaOf(member)}
-              </div>
-            ))}
+            {/* The deck: the pictures, inset by the gutter the neighbour strips
+                live in. Insetting the PICTURES (rather than growing the card with
+                negative margins) is what keeps every pile the same width as an
+                ordinary card while still showing the fan. */}
+            <div className="agnes__stackDeck" ref={deckRef}>
+              {members.map((member, position) => {
+                const distance = position - index
+                // Everything past the immediate neighbours parks at the same
+                // off-stage spot: a third print two centimetres further out would
+                // make a long chain look like a smear rather than a deck.
+                const offset = Math.max(-2, Math.min(2, distance))
+                return (
+                  <div
+                    key={member.id}
+                    className={distance === 0 ? 'agnes__stackShot agnes__stackShot--on' : 'agnes__stackShot'}
+                    data-offset={offset}
+                    /*
+                     * The dealing transform, written inline on purpose.
+                     *
+                     * Every version keeps its position in the deck expressed as an
+                     * offset from the face, and the flip only moves the face. A
+                     * shot therefore has ONE stable transform per offset, which is
+                     * what lets CSS interpolate it: the print being left behind
+                     * slides out and tilts away while the print being dealt in
+                     * slides up from the opposite side and squares up. Writing
+                     * `none` for the face would break that interpolation, so the
+                     * identity transform is spelled out.
+                     */
+                    style={{ transform: dealTransform(distance) }}
+                    /* Only the visible version is exposed: the hidden ones are
+                       still in the DOM (that is what makes the deal instant), and
+                       without this they would duplicate every button and every
+                       picture description for a screen reader and for role
+                       queries. */
+                    aria-hidden={distance === 0 ? undefined : 'true'}
+                  >
+                    {mediaOf(member)}
+                  </div>
+                )
+              })}
+            </div>
+            {/* Older versions fan out to the right of the face of the pile, newer
+                ones to the left once the user has flipped away from the newest.
+                They are SIBLINGS of the deck, not children: the deck clips its own
+                children (that is what makes a dealt print get cut off at the
+                picture edge), so a strip inside it could never paint over the
+                picture. Kept inside the picture area, they never widen the card,
+                so a pile is exactly as wide as any other card and the gallery
+                never scrolls sideways. */}
+            {leftMembers.map((member, layer) => strip(member, 'left', layer))}
+            {rightMembers.map((member, layer) => strip(member, 'right', layer))}
             <div className="agnes__stackBadge">
               <IconLayers />
               {t('stack.badge', { index: index + 1, total: members.length })}

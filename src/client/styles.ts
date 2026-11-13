@@ -1310,31 +1310,50 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   min-width: 0;
 }
 
-/* The stage reserves a gutter on BOTH sides for the fan of prints. Reserving it
-   unconditionally is what keeps the card's width constant: if the gutter only
-   appeared once the user flipped past the newest version, the card would resize
-   in the middle of the gesture — the exact jump this component exists to avoid.
-
-   The gutter is taken from OUTSIDE the cell (negative margin plus equal padding)
-   rather than from the card's own width. Shrinking the card by the gutter made a
-   stacked card narrower than every ordinary card beside it, which re-flowed its
-   action row onto a second line — the pile is supposed to look like the same
-   card with more prints behind it. */
+/* The stage is the swipe surface. It no longer grows the cell: an earlier
+   version borrowed the neighbour-strip gutter from OUTSIDE the grid cell with
+   negative margins, which made every pile wider than its column, put a
+   horizontal scrollbar on the gallery pane, and — because a horizontal
+   two-finger swipe then panned that pane too — dragged the whole screen sideways
+   while the user was only trying to flip a photo. The strips now live inside the
+   card's own picture area, so a pile occupies exactly the width of any other
+   card in the grid. */
 .agnes__stackStage {
   position: relative;
-  --agnes-stack-gutter: 13px;
-  margin: 0 calc(-1 * var(--agnes-stack-gutter));
-  padding: 0 var(--agnes-stack-gutter);
-  /* A horizontal swipe belongs to the pile; a vertical one still scrolls the
-     gallery column under the finger. */
   touch-action: pan-y;
+  overflow: hidden;
+  border-radius: var(--a-radius);
+}
+
+/* The deck: the pictures, FULL width so the face of the pile is exactly as wide
+   as any other card's picture. The neighbour strips do not take width from it —
+   they are overlaid on the picture's outer edge (see .agnes__stackStrip), which
+   keeps both the card and its picture at the ordinary size.
+
+   The deck clips its own children: a print dealt in from the side is cut off at
+   the picture edge, exactly like a card being dealt off the table, and nothing in
+   a pile can ever stick out of the card and make the gallery scroll sideways. */
+.agnes__stackDeck {
+  position: relative;
+  /* Below the strips (z-index 3): the deck is opaque pictures, the strips are the
+     fan that has to read on top of their outer edge. An explicit z-index here is
+     what makes the two comparable at all — without it the deck's children create
+     their own stacking contexts and the strips lose no matter what they ask for. */
+  z-index: 1;
+  /* The drag offset: one inherited custom property, so following the pointer
+     costs a paint and never a React render. */
+  --agnes-drag: 0px;
+  overflow: hidden;
+  border-radius: calc(var(--a-radius) - 2px);
+  /* The dealing motion. The face, the print being pushed back and the print
+     being dealt in all interpolate between their own stable transforms, which is
+     what produces the card-dealing feel instead of a flat crossfade. */
+  transition: transform 260ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 /* One strip of the fan: a neighbour's own picture, clipped to the gutter.
-   The strips sit ABOVE the front card (see the z-index note on .agnes__card--stacked)
-   because the card's box shadow spreads across the whole gutter and would
-   otherwise paint them out. They never overlap the card's border box, so being
-   above it only covers the shadow they are meant to replace. */
+   Inside the card's picture area at a z-index above the deck, because the deck
+   clips its own children and the strips have to live beside them. */
 .agnes__stackStrip {
   position: absolute;
   z-index: 3;
@@ -1345,7 +1364,7 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
      record in the chain); the strip's own picture paints over it. */
   background-color: color-mix(in srgb, var(--a-fg) 10%, var(--a-surface));
   /* The picture fills the strip and is CROPPED, not squeezed: a whole shot scaled
-     into eleven pixels averages into a flat smear that reads as a border rather
+     into nine pixels averages into a flat smear that reads as a border rather
      than as a photo. */
   background-size: cover;
   background-position: center;
@@ -1353,31 +1372,34 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   /* Decoration only: a strip that took the pointer would dead-zone the swipe and
      swallow the end of a drag. */
   pointer-events: none;
+  /* The strips belong to the pile, not to the screen: they are anchored to the
+     card's picture area and are clipped by it. */
+  transition: opacity 180ms ease-out;
 }
-/* The strips sit in the reserved gutter, one per layer, with the WIDER one
-   nearest the card. The offsets are literal pixels rather than calc(): these are
-   three small constants in one rule group, and a calc() that resolves
-   differently from what the geometry check measures is indistinguishable from a
-   strip that never painted at all.
-   Working inward from the stage's PADDING box (whose outer edge is the far side
-   of the gutter): layer 1 takes the outermost 3px, layer 0 the next 6px, and the
-   remaining pixels stay empty so no strip ever touches the card's border box. */
+/* The strips sit in the card's own gutter, one per layer, the wider one nearest
+   the picture. Offsets are literal pixels: these are three small constants in one
+   rule group, and a calc() that resolves differently from what the geometry check
+   measures is indistinguishable from a strip that never painted at all. */
+/* The strips overlay the picture's outer edge rather than taking columns from
+   it: the face must stay exactly the width of an ordinary card's picture, so the
+   fan is paid for out of the picture's own margin, not out of the layout.
+
+   They are wide enough (and carry enough of a rim) to read as PRINTS peeking out
+   from behind the face rather than as a border drawn on it: a 4px sliver is
+   indistinguishable from the picture's own edge at normal card sizes. */
 .agnes__stackStrip[data-layer='0'] {
-  top: 4px;
-  bottom: 7px;
-  /* The visible sliver: the whole gutter minus the outer layer, so the strip
-     reads as a photo edge rather than as a hairline. */
-  width: 9px;
+  top: 10px;
+  bottom: 10px;
+  width: 13px;
+  box-shadow: -1px 0 0 color-mix(in srgb, var(--a-fg) 10%, transparent);
 }
-/* right/left 4px puts the strip's outer edge 4px inside the stage edge; with the
-   9px width it ends exactly where the card's border box begins. */
-.agnes__stackStrip[data-side='left'][data-layer='0'] { left: 4px; }
-.agnes__stackStrip[data-side='right'][data-layer='0'] { right: 4px; }
+.agnes__stackStrip[data-side='left'][data-layer='0'] { left: 2px; }
+.agnes__stackStrip[data-side='right'][data-layer='0'] { right: 2px; }
 .agnes__stackStrip[data-layer='1'] {
-  top: 11px;
-  bottom: 14px;
-  width: 4px;
-  opacity: 0.9;
+  top: 18px;
+  bottom: 18px;
+  width: 8px;
+  opacity: 0.92;
 }
 .agnes__stackStrip[data-side='left'][data-layer='1'] { left: 0; }
 .agnes__stackStrip[data-side='right'][data-layer='1'] { right: 0; }
@@ -1408,23 +1430,39 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
   position: relative;
   cursor: grab;
   touch-action: pan-y;
-  /* The drag offset: one inherited custom property, so following the pointer
-     costs a paint and never a React render. */
-  --agnes-drag: 0px;
+  /* Its own stacking context, so the strips (children of this box, siblings of the
+     deck) can paint ABOVE the deck's pictures with a plain z-index. Without this
+     the deck and the strips are in different contexts and the numbers do not
+     compare — the strips end up painted under an opaque picture, i.e. present in
+     the DOM and invisible on screen. */
+  isolation: isolate;
+  /* No clipping here: the strips are siblings of the deck and must be able to
+     paint over the picture's outer edge. The deck clips ITS OWN children, which
+     is what keeps a dealt print from sticking out of the card. */
+  padding: 0;
 }
 .agnes__stackMedia:active { cursor: grabbing; }
+
+/* One print in the deck.
+   The FACE (offset 0) is opaque and in front; the neighbours are dimmed, slightly
+   tilted and scaled down behind it, and everything further out fades away. The
+   only property that changes on a flip is the transform (written inline per offset)
+   plus opacity/visibility, so the deck deals without ever reflowing: the card and
+   the picture area keep their exact boxes. */
 .agnes__stackShot {
   position: absolute;
   inset: 0;
   opacity: 0;
   visibility: hidden;
-  transform: translate3d(var(--agnes-drag), 0, 0);
-  /* Only the incoming shot animates, and only its opacity: a transform or a size
-     change here would reintroduce movement under the pointer. The visibility
-     flip is delayed by exactly the fade-out so the outgoing picture is still
-     painted while it dims (a crossfade, not a blink). */
-  transition: opacity 150ms ease-out, visibility 0s linear 150ms;
-  will-change: opacity;
+  transform-origin: 50% 60%;
+  /* A print being pushed behind the face dims as it goes, which is the depth cue
+     that makes the dealing read. */
+  transition:
+    transform 260ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    opacity 200ms ease-out,
+    visibility 0s linear 260ms;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
 }
 .agnes__stackShot:first-child {
   /* The first shot defines the area's height; the rest are absolutely stacked
@@ -1434,13 +1472,30 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
 .agnes__stackShot--on {
   opacity: 1;
   visibility: visible;
-  /* No delay on the way in: the fade starts on the same frame as the flip. */
-  transition: opacity 150ms ease-out, visibility 0s;
+  /* No delay on the way in: the deal starts on the same frame as the flip. */
+  transition:
+    transform 260ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    opacity 200ms ease-out,
+    visibility 0s;
   /* The visible shot is the only one in the hit-test path, so the picture's own
      打开大图 button belongs to the version the user is looking at. Hidden shots
      stay in the DOM (that is what keeps their decode alive) but are unreachable
      by pointer, by tab and by screen reader. */
+  z-index: 2;
+}
+/* The immediate neighbours are visible as slightly receded prints behind the
+   face; everything deeper is parked and hidden. */
+.agnes__stackShot[data-offset='1'],
+.agnes__stackShot[data-offset='-1'] {
+  opacity: 1;
+  visibility: visible;
   z-index: 1;
+}
+/* While the pointer is dragging, the deck follows it. This is a transform on the
+   deck itself, so it composes with every print's own offset instead of fighting
+   it: the whole hand of cards moves, exactly like sliding a print off a pile. */
+.agnes__stackDeck[style*='--agnes-drag'] {
+  transform: translate3d(var(--agnes-drag), 0, 0);
 }
 
 /* Every body shares ONE grid cell. The tallest version therefore sets the card's
@@ -1491,18 +1546,25 @@ textarea.agnes__field { height: auto; min-height: 72px; padding: 8px 10px; resiz
 .agnes__stackHint {
   position: absolute;
   z-index: 4;
-  right: 7px;
-  bottom: 7px;
+  /* Bottom-centre, and INSIDE the face: the left and right edges belong to the
+     fan of prints, and a pill parked on either of them hides exactly what it is
+     advertising. The gradient keeps it legible over a bright photograph — a flat
+     62%-black pill disappeared over the light half of a picture. */
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 7px;
+  gap: 5px;
+  padding: 4px 9px;
   border-radius: 999px;
-  background: rgba(12, 14, 20, 0.62);
-  backdrop-filter: blur(6px);
+  background: rgba(8, 10, 16, 0.78);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(8px);
   color: #fff;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
   white-space: nowrap;
   opacity: 0;
   transition: opacity 130ms ease-out;

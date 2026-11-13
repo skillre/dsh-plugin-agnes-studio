@@ -1315,44 +1315,57 @@ try {
         `(() => {
           const stage = document.querySelector('.agnes__stackStage');
           const media = document.querySelector('.agnes__stackMedia');
+          const deck = document.querySelector('.agnes__stackDeck');
           const hint = document.querySelector('.agnes__stackHint');
-          if (!stage || !media || !hint) return JSON.stringify(null);
-          const card = document.querySelector('.agnes__card--stacked').getBoundingClientRect();
+          const card = document.querySelector('.agnes__card--stacked');
+          if (!stage || !media || !deck || !hint || !card) return JSON.stringify(null);
+          const cardBox = card.getBoundingClientRect();
+          const deckBox = deck.getBoundingClientRect();
           const stageBox = stage.getBoundingClientRect();
           const strips = [...document.querySelectorAll('.agnes__stackStrip')].map((node) => {
             const box = node.getBoundingClientRect();
             const style = getComputedStyle(node);
-            const cardStyle = getComputedStyle(document.querySelector('.agnes__card--stacked'));
             return {
               side: node.getAttribute('data-side'),
               // The picture is a background; data-src mirrors it, and the
-              // resolved style is what proves the browser is painting it. A strip
-              // with a src but no background is a flat colour bar.
+              // resolved style is what proves the browser is painting it.
               src: node.getAttribute('data-src'),
               painted: style.backgroundImage,
-              // The strip has to have a real painted AREA too, or it is drawn and
-              // invisible at the same time.
               area: [Math.round(box.width), Math.round(box.height)],
-              box: [Math.round(box.left), Math.round(box.width), Math.round(box.height)],
-              // The strip lives in the gutter, so almost all of its box is
-              // outside the front print's border box. A strip under the card
-              // would be painted and invisible at the same time; the one-pixel
-              // tolerance covers the card's own border.
-              outsideCard: box.left >= card.right - 2.5 || box.right <= card.left + 2.5,
-              // How much of the strip sticks out beside the card: the part the
-              // user can actually see.
-              beside: Math.round((box.right <= card.left + 2.5 ? card.left - box.left : box.right - card.right) * 10) / 10,
-              // Above the card's own shadow, or the shadow paints it out.
-              aboveCard: Number(getComputedStyle(node).zIndex) > Number(cardStyle.zIndex),
+              // The strips live INSIDE the card now, in the gutter the deck
+              // leaves free. A strip outside the card's box is what used to make
+              // the pile wider than its column.
+              insideCard: box.left >= cardBox.left - 0.5 && box.right <= cardBox.right + 0.5,
+              // ...and hugging the picture's outer edge, which is where the fan
+              // reads as a print tucked behind the face rather than as a border
+              // floating in the middle of the card.
+              hugsEdge:
+                node.getAttribute('data-side') === 'right'
+                  ? Math.round((deckBox.right - box.right) * 10) / 10
+                  : Math.round((box.left - deckBox.left) * 10) / 10,
             };
           });
+          // The gallery pane is the thing that grew a scrollbar. A pile may never
+          // make it scroll horizontally: that is what dragged the whole screen
+          // sideways during a flip.
+          const panes = [...document.querySelectorAll('.agnes *')].filter((node) => {
+            const style = getComputedStyle(node);
+            return /(auto|scroll)/.test(style.overflowX) || /(auto|scroll)/.test(style.overflowY);
+          });
+          const overflowing = panes
+            .filter((node) => node.scrollWidth > node.clientWidth + 1)
+            .map((node) => ({ className: node.className, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth }));
+          const grid = document.querySelector('.agnes__grid');
           return JSON.stringify({
             strips,
-            // The gutter the strips live in: the stage is wider than the card by
-            // exactly this on each side, and it is reserved unconditionally.
-            gutter: Math.round((card.left - stageBox.left) * 100) / 100,
-            cardBox: [Math.round(card.left), Math.round(card.right)],
-            stageBox: [Math.round(stageBox.left), Math.round(stageBox.right)],
+            // The deck is inset inside the picture area: that inset IS the gutter.
+            gutter: Math.round((deckBox.left - stageBox.left) * 100) / 100,
+            cardWidth: Math.round(cardBox.width * 100) / 100,
+            stageWidth: Math.round(stageBox.width * 100) / 100,
+            deckWidth: Math.round(deckBox.width * 100) / 100,
+            overflowing,
+            gridScrollWidth: grid === null ? null : grid.scrollWidth,
+            gridClientWidth: grid === null ? null : grid.clientWidth,
             hintText: hint.textContent.trim(),
             cursor: getComputedStyle(media).cursor,
             touchAction: getComputedStyle(media).touchAction,
@@ -1365,7 +1378,7 @@ try {
         })()`,
       ),
     )
-    if (pileLook === null) throw new Error('the pile is missing its stage, media or hint')
+    if (pileLook === null) throw new Error('the pile is missing its stage, deck, media or hint')
     if (pileLook.strips.length !== 1) {
       throw new Error(`a two-version pile must fan out exactly one neighbour, got ${String(pileLook.strips.length)}`)
     }
@@ -1382,20 +1395,30 @@ try {
     if (onlyStrip.side !== 'right') {
       throw new Error(`the older version should fan out to the right of the face of the pile: ${String(onlyStrip.side)}`)
     }
-    if (!onlyStrip.outsideCard) {
-      throw new Error(`the fanned-out neighbour is under the card, not beside it: strip ${JSON.stringify(onlyStrip.box)} vs card right ${String(pileLook.cardBox)}`)
+    if (!onlyStrip.insideCard) {
+      throw new Error('the fanned-out neighbour sticks out of the card, so the pile is wider than its column')
     }
-    if (!(Number(onlyStrip.beside) >= 6)) {
-      throw new Error(`the fanned-out neighbour shows only ${String(onlyStrip.beside)}px beside the card`)
+    // It overlays the picture's outer edge: flush with it, not floating in the
+    // middle of the card and not hanging outside it.
+    if (!(Number(onlyStrip.hugsEdge) >= -1 && Number(onlyStrip.hugsEdge) <= 2)) {
+      throw new Error(`the fanned-out neighbour is not hugging the picture edge: ${String(onlyStrip.hugsEdge)}px inside`)
     }
-    if (!onlyStrip.aboveCard) throw new Error('the fanned-out neighbour is under the card shadow')
-    // The strip must be fully inside the reserved gutter, which is what keeps the
-    // card's own width identical to every other card in the grid.
-    if (!(Number(pileLook.gutter) >= 4)) {
-      throw new Error(`the pile reserves no gutter for the fan: ${String(pileLook.gutter)}px`)
+    // THE regression this check exists for: no pile may create horizontal scroll.
+    if (pileLook.overflowing.length > 0) {
+      throw new Error(`the pile made a pane scroll horizontally: ${JSON.stringify(pileLook.overflowing)}`)
     }
-    if (!(onlyStrip.box[1] <= Number(pileLook.gutter) + 12)) {
-      throw new Error(`the fanned-out neighbour overflows its gutter: ${String(onlyStrip.box[1])}px in ${String(pileLook.gutter)}px`)
+    if (Number(pileLook.gridScrollWidth) > Number(pileLook.gridClientWidth) + 1) {
+      throw new Error(`the grid overflows horizontally: ${String(pileLook.gridScrollWidth)} > ${String(pileLook.gridClientWidth)}`)
+    }
+    // The stage is exactly the card: no borrowed width, no negative margin.
+    if (Math.abs(Number(pileLook.cardWidth) - Number(pileLook.stageWidth)) > 0.5) {
+      throw new Error(`the stage is wider than the card: ${String(pileLook.stageWidth)} vs ${String(pileLook.cardWidth)}`)
+    }
+    // The deck is the full width of the card: the fan is overlaid on the picture's
+    // own edge instead of taking columns from it, so the face of a pile is exactly
+    // as wide as any other card's picture.
+    if (Math.abs(Number(pileLook.deckWidth) - Number(pileLook.cardWidth)) > 2.5) {
+      throw new Error(`the deck is narrower than the card: ${String(pileLook.deckWidth)} vs ${String(pileLook.cardWidth)}`)
     }
     if (pileLook.hintText === '') throw new Error('the flip hint has no label')
     if (pileLook.veil !== 'none') throw new Error(`the pile picture still renders the hover veil: ${String(pileLook.veil)}`)
@@ -1406,8 +1429,203 @@ try {
       throw new Error(`the pile stage would eat a vertical scroll: touch-action ${String(pileLook.stageTouch)}`)
     }
     check(
-      'browser-stack-pile-look',
-      `one neighbour strip, ${String(onlyStrip.area[0])}x${String(onlyStrip.area[1])}px painting its own picture in a ${String(pileLook.gutter)}px gutter, above the card shadow`,
+      'browser-stack-pile-contained',
+      `full-width deck, fan painted over the picture edge (${String(onlyStrip.area[0])}x${String(onlyStrip.area[1])}px), no horizontal overflow`,
+    )
+
+    // The dealing motion must be REAL: the prints carry their deck position as an
+    // inline transform with a real transition, so a flip interpolates instead of
+    // blinking. A crossfade-only build has no transform here at all.
+    const dealLook = JSON.parse(
+      await cdp.evaluate(
+        `(() => {
+          const shots = [...document.querySelectorAll('.agnes__stackShot')].map((node) => {
+            const style = getComputedStyle(node);
+            return {
+              offset: node.getAttribute('data-offset'),
+              inline: node.style.transform,
+              resolved: style.transform,
+              transition: style.transitionProperty,
+              duration: style.transitionDuration,
+            };
+          });
+          return JSON.stringify(shots);
+        })()`,
+      ),
+    )
+    if (dealLook.length < 2) throw new Error('the deck has fewer than two prints to deal')
+    const face = dealLook.find((shot) => shot.offset === '0')
+    const behind = dealLook.find((shot) => shot.offset === '1')
+    if (face === undefined || behind === undefined) {
+      throw new Error(`the deck is not positioned by offset: ${JSON.stringify(dealLook.map((s) => s.offset))}`)
+    }
+    // Every print must animate its transform, or a flip cannot deal.
+    for (const shot of dealLook) {
+      if (!String(shot.transition).includes('transform')) {
+        throw new Error(`a print does not transition its transform: ${String(shot.transition)}`)
+      }
+      if (!/[1-9]/.test(String(shot.duration))) {
+        throw new Error(`a print has no transition duration: ${String(shot.duration)}`)
+      }
+    }
+    // The face is square; the print behind it is shifted and tilted.
+    if (String(face.inline).includes('rotate(') && !String(face.inline).includes('rotate(0deg)')) {
+      throw new Error(`the face of the pile is tilted: ${String(face.inline)}`)
+    }
+    if (!String(behind.inline).includes('translate3d')) {
+      throw new Error(`the print behind the face is not shifted: ${String(behind.inline)}`)
+    }
+    if (!String(behind.inline).includes('rotate(')) {
+      throw new Error(`the print behind the face is not tilted: ${String(behind.inline)}`)
+    }
+    {
+      const info = JSON.parse(await cdp.evaluate(
+        `(() => {
+          const strip = document.querySelector('.agnes__stackStrip');
+          const deck = document.querySelector('.agnes__stackDeck');
+          const media = document.querySelector('.agnes__stackMedia');
+          if (!strip || !deck || !media) return JSON.stringify(null);
+          const sb = strip.getBoundingClientRect();
+          const db = deck.getBoundingClientRect();
+          const mb = media.getBoundingClientRect();
+          const cx = Math.round(sb.left + sb.width / 2);
+          const cy = Math.round(sb.top + Math.min(sb.height / 2, 60));
+          // NOTE: elementFromPoint cannot see the strips — they are
+          // pointer-events:none by design. Hit testing says nothing about
+          // painting here; the screenshot sampled below is the real evidence.
+          const shot = deck.querySelector('.agnes__stackShot--on');
+          return JSON.stringify({
+            strip: [Math.round(sb.left), Math.round(sb.top), Math.round(sb.width), Math.round(sb.height)],
+            deck: [Math.round(db.left), Math.round(db.top), Math.round(db.width), Math.round(db.height)],
+            media: [Math.round(mb.left), Math.round(mb.top), Math.round(mb.width), Math.round(mb.height)],
+            stripZ: getComputedStyle(strip).zIndex,
+            deckZ: getComputedStyle(deck).zIndex,
+            shotZ: shot === null ? null : getComputedStyle(shot).zIndex,
+            topAtStrip: (() => { const t = document.elementFromPoint(cx, cy); return t === null ? null : (t.className || t.tagName); })(),
+            stripBg: getComputedStyle(strip).backgroundImage.slice(0, 60),
+          });
+        })()`,
+      ))
+      process.stdout.write(`DIAGZ ${JSON.stringify(info)}\n`)
+    }
+    // The strips must be VISIBLE, not merely present: they are pointer-events:none
+    // by design, so no hit test can answer this, and a resolved url() in the
+    // computed style only proves a declaration exists. The evidence is the PAINTED
+    // PIXEL: the strip column is screenshotted and compared with the picture
+    // beside it. A strip painted correctly shows its own version's photo, which
+    // differs from the face; a strip buried under the face is identical to it.
+    {
+      const geo = JSON.parse(
+        await cdp.evaluate(
+          `(() => {
+            const strip = document.querySelector('.agnes__stackStrip');
+            const deck = document.querySelector('.agnes__stackDeck');
+            if (!strip || !deck) return JSON.stringify(null);
+            const s = strip.getBoundingClientRect();
+            const d = deck.getBoundingClientRect();
+            return JSON.stringify({
+              side: strip.getAttribute('data-side'),
+              stripX: Math.round(s.left),
+              stripW: Math.round(s.width),
+              stripY: Math.round(s.top),
+              stripH: Math.round(s.height),
+              deckRight: Math.round(d.right),
+            });
+          })()`,
+        ),
+      )
+      if (geo === null) throw new Error('the pile lost its strip while sampling pixels')
+      // A 1px-wide column inside the strip, and the same height just inside the
+      // picture, far enough in that it is certainly the face.
+      const height = Math.min(20, Math.max(6, geo.stripH - 20))
+      /** One 1px-wide column of PNG bytes at `x`. */
+      const grab = async (x) => {
+        const shot = await cdp.send('Page.captureScreenshot', {
+          format: 'png',
+          clip: { x, y: geo.stripY + 10, width: 1, height, scale: 1 },
+        })
+        return Buffer.from(shot.data, 'base64')
+      }
+      const insideStrip = await grab(geo.stripX + Math.max(1, Math.floor(geo.stripW / 2)))
+      const insideFace = await grab(geo.deckRight - 40)
+      const differs = (a, b) => {
+        const min = Math.min(a.length, b.length)
+        if (min === 0) return false
+        let diff = 0
+        for (let i = 0; i < min; i += 1) if (a[i] !== b[i]) diff += 1
+        return diff / min > 0.05
+      }
+      if (!differs(insideStrip, insideFace)) {
+        throw new Error('the strip is painted in the same pixels as the face of the pile, so it is hidden under it')
+      }
+      await writeFile(join(shotDir, 'strip-sample.png'), insideStrip)
+    }
+    check('browser-stack-deal-motion', `${String(dealLook.length)} prints positioned by offset with transform transitions`)
+
+    // The deal must actually ANIMATE, not just end up in the right place: this is
+    // the difference between a photo being dealt and a photo blinking. The check
+    // dispatches a real flip and samples the computed transform on every
+    // animation frame, requiring at least one INTERMEDIATE matrix — a value that
+    // is neither the starting transform nor the settled one.
+    const dealFrames = JSON.parse(
+      await cdp.evaluate(
+        `(async () => {
+          const stack = document.querySelector('.agnes__stack');
+          if (!stack) return JSON.stringify(null);
+          // Start from the OLDER version so the flip has somewhere to go. A
+          // two-version pile sitting on the newest one is already clamped at the
+          // end of the deck: swiping further would legitimately do nothing, and
+          // the sample would prove nothing about the animation.
+          const pills = [...stack.querySelectorAll('.agnes__stackPill')];
+          pills.at(-1)?.click();
+          await new Promise((resolve) => setTimeout(resolve, 320));
+          const face = () => stack.querySelector('.agnes__stackShot--on');
+          const before = [...stack.querySelectorAll('.agnes__stackShot')].map((n) => n.getAttribute('data-offset'));
+          const faceBefore = face();
+          const startTransform = faceBefore === null ? '' : getComputedStyle(faceBefore).transform;
+          const stage = stack.querySelector('.agnes__stackStage');
+          const rect = stage.getBoundingClientRect();
+          stage.dispatchEvent(new WheelEvent('wheel', {
+            // Negative deltaX flips BACK toward the newest version, which is
+            // where the pile was just parked away from.
+            deltaX: -140, deltaY: 0, bubbles: true, cancelable: true,
+            clientX: Math.round(rect.left + rect.width / 2), clientY: Math.round(rect.top + rect.height / 2),
+          }));
+          const seen = [];
+          for (let frame = 0; frame < 24; frame += 1) {
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            const moving = stack.querySelector('.agnes__stackShot--on');
+            if (moving !== null) seen.push(getComputedStyle(moving).transform);
+          }
+          const after = [...stack.querySelectorAll('.agnes__stackShot')].map((n) => n.getAttribute('data-offset'));
+          const endTransform = face() === null ? '' : getComputedStyle(face()).transform;
+          return JSON.stringify({ before, after, startTransform, endTransform, seen });
+        })()`,
+      ),
+    )
+    if (dealFrames === null) throw new Error('the pile disappeared while sampling the deal')
+    // The deck moved, or nothing was animated at all.
+    if (JSON.stringify(dealFrames.before) === JSON.stringify(dealFrames.after)) {
+      throw new Error(`the deck did not deal: ${JSON.stringify(dealFrames.before)}`)
+    }
+    const distinct = [...new Set(dealFrames.seen)].filter(
+      (value) => value !== dealFrames.startTransform && value !== dealFrames.endTransform,
+    )
+    if (distinct.length === 0) {
+      throw new Error(
+        `the flip snapped instead of dealing: sampled ${String(dealFrames.seen.length)} frames with no intermediate transform`,
+      )
+    }
+    check('browser-stack-deal-animates', `${String(distinct.length)} intermediate transform frame(s) during one flip`)
+
+    // Put the pile back on the newest version so the following checks start where
+    // a user would leave it.
+    await cdp.evaluate(`[...document.querySelectorAll('.agnes__stackPill')].at(0)?.click()`)
+    await until(
+      cdp.evaluate,
+      `document.querySelector('.agnes__stackShot--on')?.getAttribute('data-offset') === '0'`,
+      'the pile to return to the newest version',
+      5_000,
     )
 
     /** Send one real horizontal wheel gesture over the pile. */
@@ -1593,10 +1811,12 @@ try {
       })
       await new Promise((resolve) => setTimeout(resolve, 30))
     }
+    // The drag offset lives on the DECK now (the whole hand of prints follows the
+    // pointer), not on the picture area.
     const midDrag = await cdp.evaluate(
       `(() => {
-        const media = document.querySelector('.agnes__stackMedia');
-        return media === null ? null : getComputedStyle(media).getPropertyValue('--agnes-drag').trim();
+        const deck = document.querySelector('.agnes__stackDeck');
+        return deck === null ? null : deck.style.getPropertyValue('--agnes-drag').trim();
       })()`,
     )
     await cdp.send('Input.dispatchMouseEvent', {
@@ -1625,8 +1845,14 @@ try {
     if (JSON.stringify(afterDragBox.card) !== JSON.stringify(boxBefore.card)) {
       throw new Error(`dragging flipped but resized the card: ${JSON.stringify(afterDragBox.card)}`)
     }
-    if (String(midDrag).trim() !== '0px' && (await cdp.evaluate(`getComputedStyle(document.querySelector('.agnes__stackMedia')).getPropertyValue('--agnes-drag').trim()`)) !== '0px') {
-      throw new Error('the drag offset was not cleared after release')
+    const clearedDrag = await cdp.evaluate(
+      `(() => {
+        const deck = document.querySelector('.agnes__stackDeck');
+        return deck === null ? 'missing' : deck.style.getPropertyValue('--agnes-drag').trim();
+      })()`,
+    )
+    if (String(clearedDrag) !== '') {
+      throw new Error(`the drag offset was not cleared after release: ${String(clearedDrag)}`)
     }
     check('browser-stack-drag-flips', `picture follows the drag (${String(midDrag)}), no viewer opened, box constant (${String(afterDrag)})`)
 

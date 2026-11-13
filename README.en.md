@@ -44,10 +44,15 @@ visible before anything is touched. Four gestures, none of which fights the othe
 - **Swipe** — a two-finger horizontal trackpad swipe, or a horizontal drag on the picture, flips one
   version at a time like leafing through a stack of prints; the arrow keys do the same. Swiping past
   either end stops there instead of jumping back to the other end.
-- **Browsing never moves the card** — the switch is a pure crossfade: every version is already loaded,
-  the card is always as tall as its tallest version, and both side gutters are reserved up front, so
-  flipping **never flashes, shifts or resizes** the card and the thing under the pointer or finger
-  stays put. A vertical wheel still scrolls the gallery instead of being swallowed.
+- **The switch deals like a card** — the incoming version slides in from the side with a slight tilt
+  and scale and squares up on the face, while the version it replaces shrinks back the other way and
+  fades; it reads as a print being dealt off a deck rather than as the picture blinking.
+- **Browsing never moves the card** — every version is already loaded and the card is always as tall as
+  its tallest version, so flipping only changes each print's offset and opacity: the card
+  **never flashes, shifts or resizes** and the thing under the pointer or finger stays put.
+- **Browsing never drags the screen** — a pile is exactly as wide as an ordinary card, nothing inside it
+  sticks out, and the gallery never grows a horizontal scrollbar; a vertical wheel still scrolls the
+  gallery, and the horizontal gesture flips versions instead of being stolen by a pane pan.
 - **Jump** — click one of the version numbers under the card to go straight to that version; its
   view / download / continue-editing / delete actions all act on it. Click "1" to go back to following
   the newest version, so a newly generated edit still arrives on the face of the pile.
@@ -210,7 +215,7 @@ the command above if you no longer want the files.
 
 ## Verification
 
-- 204 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
+- 206 offline tests: parameter validation, response parsing, error mapping, storage concurrency and
   eviction, route fencing, media-path shape, schema conformance, tool argument mapping, panel rendering
   (including a retry turning its own card into the progress card with no placeholder added; a finished
   image filling the composer and submitting as a symbolic reference; a failed record restored for
@@ -231,8 +236,8 @@ the command above if you no longer want the files.
 - Packed tarball installed into a disposable isolated profile: `--dump-config` composition, bounded
   real startup, authenticated `/api` calls, a real image generation downloaded through the media
   route, records and files surviving a restart, and the file disappearing after deletion.
-- Real headless Chrome driving the DSH Web app — 46 checks (the two retry, three continue-editing and
-  ten version-stack checks need a real API key; without one they are skipped and reported as such): sidebar entry, panel render, the
+- Real headless Chrome driving the DSH Web app — 48 checks (the two retry, three continue-editing and
+  twelve version-stack checks need a real API key; without one they are skipped and reported as such): sidebar entry, panel render, the
   two-pane layout (measured: both panes side by side, the composer not spanning the panel), the
   model-derived controls **and their shape** (four resolutions are a segmented control, eight ratios
   are chips), Flash narrowing the resolution list, the generate button reachable without scrolling,
@@ -249,14 +254,18 @@ the command above if you no longer want the files.
   card, marks the new card with its lineage, and the store keeps the symbolic reference and
   `derivedFrom`), and the **version pile** (a continuation settling into its source's stack rather than adding a sibling —
   card count unchanged, one pile, one fanned-out neighbour strip, two version numbers, a badge reporting
-  two versions and lineage on the top card; the strip is measured to be outside the card's border box,
-  above its shadow, and actually painting its own picture; a REAL horizontal wheel gesture then flips to
-  the older version with the badge and rail following, and the card's and the picture's
-  `getBoundingClientRect` must be identical before and after (the machine-checkable form of "it flashed
-  and shook", which jsdom cannot measure); swiping back restores the newest version with the same box; a
-  REAL 130px pointer drag makes the picture follow the pointer, flips on release, does NOT open the
-  viewer, and keeps the box constant; the arrow keys do the same; a vertical wheel must not flip (and
-  must scroll the gallery when there is anything to scroll); clicking version "2" pins the older version
+  two versions and lineage on the top card; NO pane in the panel may grow horizontal overflow and the
+  stage is measured to be exactly as wide as the card — the machine-checkable form of "the whole screen
+  moved with the swipe"; the strip is checked by SCREENSHOTTING its own column of pixels and requiring
+  them to differ from the face of the pile, because hit testing cannot see a `pointer-events:none`
+  decoration; the deal is checked by flipping with a real wheel gesture and sampling the computed
+  transform on every animation frame, requiring at least one intermediate value, which a flat crossfade
+  can never produce; a REAL horizontal wheel gesture then flips to the older version with the badge and
+  rail following, and the card's and the picture's `getBoundingClientRect` must be identical before and
+  after; swiping back restores the newest version with the same box; a REAL 130px pointer drag makes the
+  deck follow the pointer, flips on release, does NOT open the viewer, clears its offset, and keeps the
+  box constant; the arrow keys do the same; a vertical wheel must not flip (and must scroll the gallery
+  when there is anything to scroll); clicking version "2" pins the older version
   with the badge and rail following, surviving the pointer leaving, keeping the card height, and moving
   the strip to the other side still painting its own picture; the pile re-rendered in the OTHER theme
   must keep a real, non-transparent strip — the earlier theme screenshot predates any pile, so this is

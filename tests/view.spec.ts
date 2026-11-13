@@ -731,12 +731,103 @@ describe('version stack', () => {
         // face means the newer ones appear to its left). It is paint only: it
         // adds no node, takes no layout space, and cannot be clipped.
         .replace(/ style="[^"]*"/g, '')
-        .replace(/ data-(flipping|fan|side|layer|src)="[^"]*"/g, '')
+        .replace(/ data-(flipping|fan|side|layer|src|offset)="[^"]*"/g, '')
+        // The deal transform is written inline per print and is exactly what is
+        // expected to change when the deck is dealt; the NODE COUNT is asserted
+        // separately below, which is what rules out a remount.
         // The strips point at whichever neighbours are behind the face of the
         // pile, so their picture follows the visible version by design. The FRONT
         // print's image is asserted above by `frontSources`, so a remount there
         // would still fail this test.
     expect(shape(stack.innerHTML)).toBe(shape(before))
+  })
+
+  it('keeps the whole pile inside its own cell, with no horizontal overflow', async () => {
+    // The defect this fixes: the pile used to borrow its neighbour-strip gutter
+    // from OUTSIDE the grid cell with negative margins. Every pile was then wider
+    // than its column, the gallery pane grew a horizontal scrollbar, and — since
+    // a two-finger horizontal swipe panned that pane too — flipping a photo
+    // dragged the entire screen sideways.
+    //
+    // The structural guarantee is that NOTHING in a pile is positioned outside
+    // the card: the strips and the deck live inside the picture area, and the
+    // stage has no negative margin or padding of its own.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'v2 prompt', v1.id)
+    const v3 = version('v3000000-0000-4000-8000-000000000003', 'v3 prompt', v2.id)
+    renderPanel({ generations: [v3, v2, v1] })
+    await screen.findByText('v3 prompt')
+
+    const stack = stackElement()
+    const stage = stack.querySelector('.agnes__stackStage') as HTMLElement
+    const card = stack.querySelector('.agnes__card--stacked') as HTMLElement
+    const deck = stack.querySelector('.agnes__stackDeck') as HTMLElement
+    expect(stage).toBeTruthy()
+    expect(deck).toBeTruthy()
+
+    // The stage is exactly the card: no margin, no padding, no width of its own.
+    expect(stage.style.margin).toBe('')
+    expect(stage.style.padding).toBe('')
+    expect(stage.style.width).toBe('')
+
+    // The strips are children of the CARD (inside its picture area), not of the
+    // grid cell, and there are two (the neighbours on either side of version 3).
+    for (const strip of [...stack.querySelectorAll('.agnes__stackStrip')]) {
+      expect(card.contains(strip)).toBe(true)
+      expect(stage.contains(strip.parentElement as Node)).toBe(true)
+    }
+    // The deck is inset inside the picture area, so its pictures are narrower than
+    // the picture box: that inset IS the gutter the strips show through.
+    expect(deck.style.margin).toBe('')
+    expect(within(deck).queryByRole('img')).toBeTruthy()
+  })
+
+  it('deals the faces with a real transform transition instead of a flat fade', async () => {
+    // The interaction complaint this fixes: switching versions was an opacity
+    // crossfade, which reads as a photograph blinking rather than as a card being
+    // dealt. Every print now carries its deck position as an inline transform and
+    // CSS interpolates between those stable endpoints.
+    const v1 = version('v1000000-0000-4000-8000-000000000001', 'v1 prompt')
+    const v2 = version('v2000000-0000-4000-8000-000000000002', 'v2 prompt', v1.id)
+    const v3 = version('v3000000-0000-4000-8000-000000000003', 'v3 prompt', v2.id)
+    renderPanel({ generations: [v3, v2, v1] })
+    await screen.findByText('v3 prompt')
+
+    /** The prints in deck order, with the offset and transform currently applied. */
+    const shots = (): { offset: string; transform: string; on: boolean }[] =>
+      [...document.querySelectorAll('.agnes__stackShot')].map((node) => ({
+        offset: node.getAttribute('data-offset') ?? '',
+        transform: (node as HTMLElement).style.transform,
+        on: node.classList.contains('agnes__stackShot--on'),
+      }))
+
+    // Newest on the face: offset 0, identity transform, nothing else in front.
+    const atNewest = shots()
+    expect(atNewest.filter((shot) => shot.on)).toHaveLength(1)
+    expect(atNewest[0]?.offset).toBe('0')
+    expect(atNewest[0]?.transform).toContain('translate3d(0, 0, 0)')
+    // The older versions fan out to the right: positive offsets, shifted and
+    // tilted, so the deck has depth instead of three coincident pictures.
+    expect(atNewest[1]?.offset).toBe('1')
+    expect(atNewest[1]?.transform).toContain('translate3d')
+    expect(atNewest[1]?.transform).toContain('rotate(')
+    expect(atNewest[1]?.transform).toContain('scale(')
+    // A fan that never leaves the centre would look like a single print.
+    const shifted = /translate3d\((-?[0-9.]+)%/.exec(atNewest[1]?.transform ?? '')
+    expect(Number(shifted?.[1] ?? '0')).toBeGreaterThan(0)
+
+    // Flipping one version to the right moves the FACES, not the nodes: the same
+    // three elements keep their transforms for the two new neighbours.
+    swipe('next')
+    await waitFor(() => expect(frontSources()).toEqual([v2.asset?.src]))
+    const atMiddle = shots()
+    expect(atMiddle).toHaveLength(3)
+    expect(atMiddle.filter((shot) => shot.on)).toHaveLength(1)
+    // v3 is now behind the face on the LEFT (negative offset), v1 on the right.
+    expect(atMiddle[0]?.offset).toBe('-1')
+    expect(atMiddle[0]?.transform).toContain('rotate(-')
+    expect(atMiddle[1]?.offset).toBe('0')
+    expect(atMiddle[2]?.offset).toBe('1')
   })
 
   it('commits to a version from the rail, and keeps it after the pointer leaves', async () => {
